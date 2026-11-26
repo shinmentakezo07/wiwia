@@ -208,6 +208,21 @@ export const revealProviderKey = (provider: string, label: string) =>
     { method: "GET" },
   );
 
+export interface ProviderKeyTestResult {
+  ok: boolean;
+  verdict: string;
+  status: number | null;
+  latency_ms: number;
+  model: string;
+  detail: string;
+}
+
+export const testProviderKey = (provider: string, label: string, model: string) =>
+  api<ProviderKeyTestResult>(
+    `/admin/providers/${encodeURIComponent(provider)}/keys/${encodeURIComponent(label)}/test`,
+    { method: "POST", body: JSON.stringify({ model }) },
+  );
+
 export const addProvider = (body: {
   name: string;
   provider_type: string;

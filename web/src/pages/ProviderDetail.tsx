@@ -26,6 +26,7 @@ import {
   addProviderKey,
   updateAliases,
   revealProviderKey,
+  testProviderKey,
 } from "@/api/client";
 import type { ModelAliasEntry, PoolKey, Provider } from "@/api/types";
 import {
@@ -109,7 +110,7 @@ const STATUS_DOT: Record<PoolKey["status"], string> = {
 
 // -- key pool ------------------------------------------------------------------
 
-function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => void }) {
+function KeyRow(props: { provider: string; k: PoolKey; models: string[]; onError: (m: string) => void }) {
   const qc = useQueryClient();
   const [editingWeight, setEditingWeight] = useState(false);
   const [weight, setWeight] = useState(String(props.k.weight));
@@ -168,7 +169,24 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
     onError: (e) => props.onError(e.message),
   });
 
+  const [testing, setTesting] = useState(false);
+  const [testModel, setTestModel] = useState(props.models[0] ?? "");
+  const test = useMutation({
+    mutationFn: (model: string) => testProviderKey(props.provider, props.k.label, model),
+    onError: (e) => props.onError(e.message),
+  });
+  const runTest = () => {
+    const m = testModel.trim();
+    if (!m) {
+      props.onError("Pick or type a model to test the key against.");
+      return;
+    }
+    test.mutate(m);
+  };
+  const listId = `test-models-${props.k.label}`;
+
   return (
+    <Fragment>
     <tr className="group">
       <TD className="font-medium">
         <div className="flex items-center gap-2">
@@ -279,6 +297,15 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
         </Button>
       </TD>
       <TD>
+        <div className="flex items-center gap-1">
+        <Button
+          variant="outline"
+          disabled={!props.k.has_secret}
+          title={props.k.has_secret ? "Send a 1-token test request with this key" : "Set a secret first"}
+          onClick={() => setTesting((v) => !v)}
+        >
+          <Zap size={14} /> Test
+        </Button>
         <Button
           variant="danger"
           aria-label="Delete key"
@@ -291,14 +318,60 @@ function KeyRow(props: { provider: string; k: PoolKey; onError: (m: string) => v
         >
           <Trash2 size={14} />
         </Button>
+        </div>
       </TD>
     </tr>
+    {testing && (
+      <tr>
+        <td colSpan={5} className="px-3 pb-3">
+          <form
+            className="flex flex-wrap items-center gap-2"
+            onSubmit={(e) => { e.preventDefault(); runTest(); }}
+          >
+            <Input
+              className="min-h-[44px] w-full sm:w-72 text-[12px]"
+              list={listId}
+              aria-label="Model to test"
+              placeholder="Model id"
+              value={testModel}
+              onChange={(e) => setTestModel(e.target.value)}
+            />
+            <datalist id={listId}>
+              {props.models.map((m) => <option key={m} value={m} />)}
+            </datalist>
+            <Button type="submit" variant="outline" disabled={test.isPending}>
+              {test.isPending ? <Loader2 size={14} className="animate-spin" /> : "Run test"}
+            </Button>
+            {test.data && (
+              <span className="flex items-center gap-2 text-[12px]">
+                <Badge tone={test.data.ok ? "green" : "red"}>{test.data.verdict}</Badge>
+                <span className="text-[var(--admin-text-dim)]">
+                  {test.data.status ?? "—"} · {test.data.latency_ms} ms · {test.data.model}
+                </span>
+                {test.data.detail && (
+                  <span className="break-all font-mono text-[var(--admin-text-dim)]">{test.data.detail}</span>
+                )}
+              </span>
+            )}
+          </form>
+        </td>
+      </tr>
+    )}
+    </Fragment>
   );
 }
 
 export function KeyPoolCard(props: { p: Provider; providerName: string; onError: (m: string) => void }) {
   const qc = useQueryClient();
   const [roundRobin, setRoundRobin] = useState(props.p.round_robin);
+  const groupsQuery = useQuery({ queryKey: ["model-groups"], queryFn: getModels });
+  const models = useMemo(() => {
+    const s = new Set<string>();
+    for (const g of groupsQuery.data?.groups ?? []) {
+      for (const d of g.deployments) if (d.provider === props.providerName) s.add(d.model_id);
+    }
+    return [...s].sort();
+  }, [groupsQuery.data, props.providerName]);
 
   const toggleRR = useMutation({
     mutationFn: () => patchProvider(props.providerName, { round_robin: !roundRobin }),
@@ -335,7 +408,7 @@ export function KeyPoolCard(props: { p: Provider; providerName: string; onError:
       ) : (
         <Table head={["Label", "Key", "Weight", "Status", "Action"]}>
           {props.p.keys.map((k) => (
-            <KeyRow key={k.label} provider={props.providerName} k={k} onError={props.onError} />
+            <KeyRow key={k.label} provider={props.providerName} k={k} models={models} onError={props.onError} />
           ))}
         </Table>
       )}

@@ -287,7 +287,14 @@ from wiwi.core.gateway import (
     build_log_event,
     estimate_request_tokens,
 )
-from wiwi.core.recovery import HealthHealer
+from wiwi.core.recovery import (
+    PROBE_MAX_TOKENS,
+    HealthHealer,
+    ProbeVerdict,
+    _probe_request,
+    build_url,
+    probe_verdict,
+)
 from wiwi.core.telemetry import tracer
 from wiwi.cost.pricing import CostEngine
 from wiwi.ir import types as ir
@@ -4281,6 +4288,71 @@ def create_app(config: WiwiConfig) -> FastAPI:
         await state.logs.log_audit(actor="master", action="provider_key.reveal",
                                    target=f"{name}/{label}", diff={})
         return ORJSONResponse({"label": label, "secret": key.secret})
+
+    @app.post("/admin/providers/{name}/keys/{label}/test")
+    async def admin_test_provider_key(name: str, label: str, request: Request):
+        """Send a 1-token completion through one pool key against a chosen model.
+
+        Bypasses the router (no cooldown/circuit side effects): it reports what
+        the upstream says for exactly this key + model. Body: ``{"model": id}``.
+        """
+        resp = await require_admin_dep(request)
+        if resp:
+            return resp
+        acct = state.router.providers.get(name)
+        if acct is None:
+            return _err(404, "not_found_error", f"unknown provider '{name}'", request)
+        key = acct.get_key(label)
+        if key is None:
+            return _err(404, "not_found_error",
+                        f"unknown key '{label}' on provider '{name}'", request)
+        if not (key.secret or "").strip():
+            return _err(409, "invalid_request_error",
+                        f"key '{label}' has no secret", request)
+        body, jerr = await json_body(request)
+        if jerr:
+            return jerr
+        model = body.get("model") if isinstance(body, dict) else None
+        if not isinstance(model, str) or not model.strip():
+            return _err(400, "invalid_request_error", "'model' is required", request)
+        model = model.strip()
+        adapter = fresh_adapter(acct.provider_type)
+        stream = bool(getattr(adapter, "force_stream", False))
+        key_ref = ProviderKeyRef(label=key.label, secret=key.secret)
+        params: dict[str, Any] = {"max_tokens": PROBE_MAX_TOKENS, "extra_body": {},
+                                  "drop_params": True,
+                                  "provider_type": acct.provider_type}
+        try:
+            req_body = adapter.encode_request(_probe_request(stream, model), model, params)
+            url = build_url(adapter, acct.base_url, model, acct.provider_type,
+                            stream, key_ref)
+            headers = {**adapter.headers(key_ref), **acct.extra_headers}
+        except Exception as exc:  # noqa: BLE001 — report, never 500
+            return _err(400, "invalid_request_error",
+                        f"could not build test request: {type(exc).__name__}", request)
+        t0 = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as hc:
+                r = await hc.post(url, json=req_body, headers=headers)
+        except httpx.HTTPError as exc:
+            # Class name only: the message can quote a querystring credential.
+            verdict, status, detail = "unreachable", None, type(exc).__name__
+        else:
+            status = r.status_code
+            v = probe_verdict(status, r.content, allow_unframed=acct.provider_type in (
+                "cline", "workbuddy", "opencode"))
+            verdict = v.value
+            detail = ""
+            if v is not ProbeVerdict.HEALTHY:
+                detail = (r.text[:300] if status != 200
+                          else "error envelope in 200 body")
+        latency_ms = round((time.monotonic() - t0) * 1000)
+        await state.logs.log_audit(actor="master", action="provider_key.test",
+                                   target=f"{name}/{label}",
+                                   diff={"model": model, "verdict": verdict})
+        return ORJSONResponse({"ok": verdict == "healthy", "verdict": verdict,
+                               "status": status, "latency_ms": latency_ms,
+                               "model": model, "detail": detail})
 
     @app.patch("/admin/providers/{name}/keys/{label}")
     async def admin_patch_provider_key(name: str, label: str, request: Request):
