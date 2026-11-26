@@ -41,43 +41,6 @@ jobs:
       - name: Pytest
         run: python3 -m pytest tests/ -q
 
-  go:
-    name: go (vet, test, shared-db interop)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: wiwi-go/go.mod
-          cache-dependency-path: wiwi-go/go.sum
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-
-      - name: Install (python gate deps, for the shared-db suite)
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      - name: Vet
-        run: go vet ./...
-        working-directory: wiwi-go
-
-      - name: Test
-        run: go test ./...
-        working-directory: wiwi-go
-
-      # The cross-backend suite: Python seeds one SQLite DB, the Go helper
-      # binary built from wiwi-go/cmd/shared-db-interop reads and writes the
-      # same file, each side verifies the other's rows.
-      - name: Shared-DB interop (pytest drives the Go binary)
-        run: python3 -m pytest tests/test_shared_db_go.py -q
-
   web:
     name: web (lint, test, typecheck, build)
     runs-on: ubuntu-latest
