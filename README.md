@@ -19,7 +19,6 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge&logo=opensourceinitiative&logoColor=white"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white">
-  <img alt="Go backend" src="https://img.shields.io/badge/Go-Gin-00ADD8?style=for-the-badge&logo=go&logoColor=white">
   <img alt="React 19" src="https://img.shields.io/badge/React_19-Vite_6-149eca?style=for-the-badge&logo=react&logoColor=white">
   <img alt="Self-hosted" src="https://img.shields.io/badge/self--hosted-one%20process-F59E0B?style=for-the-badge&logo=docker&logoColor=white">
 </p>
@@ -29,15 +28,13 @@
     <td align="center"><b>3</b><br/><sub>inbound dialects</sub></td>
     <td align="center"><b>13</b><br/><sub>outbound providers</sub></td>
     <td align="center"><b>39</b><br/><sub>possible pairings</sub></td>
-    <td align="center"><b>2</b><br/><sub>interchangeable backends</sub></td>
+    <td align="center"><b>1</b><br/><sub>backend: Python/FastAPI</sub></td>
   </tr>
 </table>
 
 **No pairwise converters. Every request decodes into one canonical IR and re-encodes in the caller's dialect.**
 
-**Two implementations, one contract.** Choose the Python/FastAPI backend (`wiwi/`, the default) or the Go/Gin
-backend (`wiwi-go/`). Both serve the same API and React console, read the same configuration, and share SQLite or
-Postgres state.
+**One backend.** wiwi is a single Python/FastAPI process that serves the three inbound dialects, the admin console, and the React SPA.
 
 </div>
 
@@ -59,7 +56,7 @@ Postgres state.
 
 **Run it**
 - [⚡ Quickstart](#-quickstart) — install, mint a key, connect a client
-- [🐍🐹 Choose a backend](#-choose-a-backend) — Python or Go, locally or in one Docker image
+- [🐍 Run the backend](#-run-the-backend) — bare, with Vite, or in Docker
 - [🧑‍🍳 Recipes](#-recipes) — four copy-paste setups
 - [📡 What ships](#-what-ships) — inbound surfaces and outbound providers
 - [⚙️ Configuration](#-configuration) — the annotated `wiwi.yaml`
@@ -155,8 +152,8 @@ export OPENAI_API_KEY=sk-... \
        WIWI_MASTER_KEY=sk-wiwi-master-mysecret
 ```
 
-**③ Install and run** — binds <code>0.0.0.0:4000</code>. Python is the default; see
-[Choose a backend](#-choose-a-backend) for Go and the combined development stack.
+**③ Install and run** — binds <code>0.0.0.0:4000</code>. For backend + Vite together, see
+[Run the backend](#-run-the-backend).
 
 ```bash
 uv venv && uv pip install -e ".[dev]"
@@ -201,29 +198,24 @@ docker compose up --build
 ```
 
 Postgres 16 + Redis + wiwi together, a `wiwi_data` volume, `DATABASE_URL` defaulted to the bundled Postgres.
-Override with `DATABASE_URL=sqlite+aiosqlite:///…` to stay on SQLite. The four-stage build installs Python deps,
-builds the SPA and Go binary, then produces one runtime image that runs as non-root `wiwi` (uid 10001).
+Override with `DATABASE_URL=sqlite+aiosqlite:///…` to stay on SQLite. The three-stage build installs Python deps,
+builds the SPA, then produces one runtime image that runs as non-root `wiwi` (uid 10001).
 
-### 🐍🐹 Choose a backend
+### 🐍 Run the backend
 
-The two backends are alternatives, not two processes to run together. **Python/FastAPI is the default**; Go/Gin
-implements the same canonical-IR architecture and admin surface. The repository's shared-database suite proves
-that keys, users, and prices written by one backend can be read and updated by the other. Provider and runtime
-parity is tracked in [`wiwi-go/PARITY.md`](wiwi-go/PARITY.md).
+`wiwi` is the only backend. Start it bare, or with the Vite dev server for console work:
 
-| Environment | Python (default) | Go |
-|---|---|---|
-| Server only | `wiwi --config wiwi.yaml` | `cd wiwi-go && CGO_ENABLED=1 go build -o bin/wiwi ./cmd/wiwi && ./bin/wiwi --config ../wiwi.yaml` |
-| Backend + Vite UI | `./start.sh py` | `./start.sh go` |
-| Docker / Compose | `BACKEND=py docker compose up --build` | `BACKEND=go docker compose up --build` |
+| Environment | Command |
+|---|---|
+| Server only | `wiwi --config wiwi.yaml` |
+| Backend + Vite UI | `./start.sh` |
+| Docker / Compose | `docker compose up --build` |
 
-The Go build needs the toolchain from `wiwi-go/go.mod` and **CGO enabled** for SQLite. Go has no hot reload;
-`./start.sh go` rebuilds the binary. Docker builds both backends once, so changing `BACKEND` and restarting needs
-no rebuild. The runtime image uses `DATABASE_URL=sqlite+aiosqlite:////app/data/wiwi.db` by default and persists
-the journal under `/data/journals`; it normalizes that URL for the Go driver.
+The Docker runtime image uses `DATABASE_URL=sqlite+aiosqlite:////app/data/wiwi.db` by default and persists
+the journal under `/data/journals`. A platform that injects `PORT` (Railway, Render, Fly) gets the gateway on
+that port via `docker/entrypoint-backend.sh`.
 
-**Railway:** set `BACKEND=go` to select Go; leave it unset (or use `py`) for Python. Keep the same `WIWI_CONFIG`
-and `DATABASE_URL` when switching backends, and use managed Postgres for durable Railway state. `PORT` selects
+**Railway:** keep `WIWI_CONFIG` and `DATABASE_URL` set, and use managed Postgres for durable Railway state. `PORT` selects
 the listen port in the container, and `/health` is the healthcheck.
 
 ### 🚂 Or deploy to Railway
@@ -500,9 +492,7 @@ Four things wiwi does that a config-file gateway doesn't.
 - Strategies: `simple-shuffle`, `least-busy`, `latency-based`; `cycle_every_n` forces the cursor to advance so
   traffic actually *rotates* rather than just weight-spreading.
 - Optional `HealthHealer` probes sick keys with 1-token requests and restores them into a reduced-weight
-  *probation* state. **Off by default** — probes spend real provider money. The Go router also supports the
-  `health_model: scored` EWMA latency/success-rate model and adaptive cooldowns; the Python config does not
-  currently expose those fields.
+  *probation* state. **Off by default** — probes spend real provider money.
 
 ### 🔐 Keys, budgets, and what it cost
 
@@ -816,18 +806,12 @@ wiwi/                      ~45k lines of Python across 96 modules (including typ
 ├── ratelimit/ · cache/ · cost/ · logging_core/
 └── server/                app.py · routers/ · schemas/ · services/ · stats.py · metrics.py · config_store.py
 
-wiwi-go/                   ~24k lines of Go implementation, 83 non-test files
-├── cmd/wiwi/              CLI entrypoint; cmd/shared-db-interop/ proves Python ↔ Go database compatibility
-└── internal/              config · ir · wire · providers · router · core · streaming · auth · ratelimit
-                           cache · cost · logging · metrics · oauth · server · store · telemetry · versions
-
-web/                       React 19 + TypeScript strict + Vite 6 + Tailwind 4; shared by both backends
+web/                       React 19 + TypeScript strict + Vite 6 + Tailwind 4; the admin console and public site
 ```
 
 <table>
   <tr>
     <td align="center"><b>96</b><br/><sub>Python files</sub></td>
-    <td align="center"><b>83</b><br/><sub>Go implementation files</sub></td>
     <td align="center"><b>102</b><br/><sub>TS/TSX files</sub></td>
     <td align="center"><b>9 + 59</b><br/><sub>method/path pairs: /v1 + /admin</sub></td>
     <td align="center"><b>4401</b><br/><sub>Python tests passing</sub></td>
@@ -884,12 +868,6 @@ python3 -m pytest tests/ -q
 ruff check wiwi/ tests/ scripts/
 python3 scripts/audit_lint.py
 
-# Cross-backend SQLite interoperability (builds the Go helper itself)
-python3 -m pytest tests/test_shared_db_go.py -q
-
-# Go — CGO is required by the SQLite driver
-(cd wiwi-go && CGO_ENABLED=1 go test ./... && go vet ./...)
-
 # Frontend — npm is authoritative; lint, unit tests, typecheck + build
 (cd web && npm ci && npm run lint && npm test && npm run build)
 
@@ -909,12 +887,11 @@ next. Gaps in the numbering are real and filenames sort lexicographically: find 
 than trusting the last line of `ls`.
 
 > The counts in this README are checked in periodically. Re-derive them with
-> `python3 -m pytest tests/ -q`, `find wiwi -name '*.py' | wc -l`, and
-> `find wiwi-go -name '*.go' ! -name '*_test.go' | wc -l`.
+> `python3 -m pytest tests/ -q` and `find wiwi -name '*.py' | wc -l`.
 
-Last verified in this checkout: **4401 Python tests passed, 12 skipped**; all Go packages passed tests and vet;
+Last verified in this checkout: **4401 Python tests passed, 12 skipped**;
 **48 frontend tests passed**; the frontend production build succeeded; Python lint and audit-register lint passed.
-CI runs the same Python, Go, shared-database, and web gates in separate jobs.
+CI runs the same Python and web gates in separate jobs.
 
 ---
 
@@ -928,7 +905,6 @@ CI runs the same Python, Go, shared-database, and web gates in separate jobs.
 | [`docs/PROVIDERS.md`](docs/PROVIDERS.md) | Per-provider setup guide |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/CORE.md`](docs/CORE.md) · [`docs/STREAMING.md`](docs/STREAMING.md) | System design |
 | [`docs/ADMIN.md`](docs/ADMIN.md) | Console + admin API design, design system |
-| [`wiwi-go/README.md`](wiwi-go/README.md) · [`wiwi-go/PARITY.md`](wiwi-go/PARITY.md) | Go build/run guide · per-subsystem parity matrix |
 | `UPDATE.md` | **Read before touching translation.** Changelog of every OpenAI ↔ Anthropic fix with before/after snippets |
 | `AUDIT.md` | Known-bug register: severity, `file:line`, fix sketches |
 
@@ -967,6 +943,6 @@ Use it, fork it, ship it commercially. If you operate a server for paying custom
 
 <img src="docs/assets/wiwi-mark.svg" width="44" alt="wiwi">
 
-<sub>MIT licensed · server operation governed by <a href="TERMS.md">Terms of Use</a> · built with Python/FastAPI or Go/Gin, React 19, and npm</sub>
+<sub>MIT licensed · server operation governed by <a href="TERMS.md">Terms of Use</a> · built with Python/FastAPI, React 19, and npm</sub>
 
 </div>

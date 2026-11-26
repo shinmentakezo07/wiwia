@@ -1,10 +1,6 @@
-# wiwi — multi-stage build producing ONE image that can run either backend.
-# Select at runtime (no rebuild) with the BACKEND env var (see
-# docker/entrypoint-backend.sh): BACKEND=py (default) or BACKEND=go.
-#
-# The two backends share one database schema (wiwi-go/internal/store/migrate.go
-# is a copy of wiwi/'s DDL), so a BACKEND switch keeps every key, user, price,
-# and log row in place.
+# wiwi — multi-stage build producing the runtime image for the Python backend
+# (wiwi/, FastAPI). The admin SPA is built in the same image and served by the
+# gateway from wiwi/server/static/.
 
 # Stage 1: Python dependencies + package install
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS py-builder
@@ -20,8 +16,7 @@ RUN uv venv /app/.venv && uv pip install -p /app/.venv/bin/python ".[redis,otel]
 
 # Stage 2: Build the admin web UI (React + TypeScript → static assets).
 # Node 24 matches web/package.json `engines` (>=24) and the same `npm ci`
-# install path as start.sh and local dev — one package manager. The assets are
-# served by BOTH backends (Go reads WIWI_STATIC_DIR too).
+# install path as start.sh and local dev — one package manager.
 FROM node:24-bookworm-slim AS web-builder
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
@@ -29,39 +24,16 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-# Stage 3: Build the Go backend (wiwi-go/cmd/wiwi → static binary). go.mod
-# pins toolchain go1.27; a matching builder tracks it without a hard tag here.
-FROM golang:1.27-bookworm AS go-builder
-WORKDIR /src
-# Credential-free build: disable the module proxy so `go mod download` is
-# reproducible from go.mod/go.sum alone.
-ENV GOTOOLCHAIN=local GOFLAGS=-mod=readonly
-COPY wiwi-go/go.mod wiwi-go/go.sum ./
-RUN go mod download
-COPY wiwi-go/ ./
-# Strip + CGO: the SQLite driver (mattn/go-sqlite3) needs cgo, so CGO_ENABLED
-# stays on and the gcc from the golang image provides it at build time only.
-RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/wiwi ./cmd/wiwi
-
-# Stage 4: Final runtime image
+# Stage 3: Final runtime image
 FROM python:3.12-slim-bookworm
-# libsqlite3: mattn/go-sqlite3 links the system library at runtime (its amal-
-# gamation is compiled in via cgo, but the runtime image still needs the C
-# library bits Python's aiosqlite path and any future link change rely on).
-RUN useradd -m -u 10001 wiwi \
-    && apt-get update && apt-get install -y --no-install-recommends libsqlite3-0 \
-    && rm -rf /var/lib/apt/lists/*
+RUN useradd -m -u 10001 wiwi
 WORKDIR /app
 
 # Python venv from the builder
 COPY --from=py-builder /app/.venv /app/.venv
 
-# Go backend binary from its builder
-RUN mkdir -p /app/wiwi-go/bin
-COPY --from=go-builder /out/wiwi /app/wiwi-go/bin/wiwi
-
 # Built web assets — the vite build outputs to wiwi/server/static/
-# Set WIWI_STATIC_DIR so app.py (and the Go staticDir()) finds them.
+# Set WIWI_STATIC_DIR so app.py finds them.
 COPY --from=web-builder /wiwi/server/static/ /app/wiwi/server/static/
 ENV WIWI_STATIC_DIR=/app/wiwi/server/static
 
@@ -70,8 +42,8 @@ ENV WIWI_STATIC_DIR=/app/wiwi/server/static
 # providers; absent keys are filtered out at load time.
 COPY wiwi.yaml.example /app/wiwi.yaml
 
-# Backend selector: BACKEND=go|py (default py). Must live in the image
-# directory mounted nowhere else, so COPY at /app/entrypoint-backend.sh.
+# Entrypoint: PORT-aware launcher. Must live in the image directory mounted
+# nowhere else, so COPY at /app/entrypoint-backend.sh.
 COPY docker/entrypoint-backend.sh /app/entrypoint-backend.sh
 RUN chmod +x /app/entrypoint-backend.sh
 
@@ -94,18 +66,18 @@ ENV WIWI_STREAM_JOURNAL_DIR=/data/journals
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    DATABASE_URL=sqlite+aiosqlite:////app/data/wiwi.db \
-    BACKEND=py
+    DATABASE_URL=sqlite+aiosqlite:////app/data/wiwi.db
 
 USER wiwi
 EXPOSE 4000
 # Port-aware healthcheck. A hosting platform that injects PORT (Railway,
 # Render, Fly) expects the process to answer there — that is where its edge
-# proxy and its own healthcheck talk — so the container probe follows
-# the same variable instead of assuming 4000. With PORT unset the shipped
-# default (and the HuggingFace Space's app_port) still applies. urllib keeps
-# the probe backend-independent: either binary answers /health.
+# proxy and its own healthcheck talk — so the container probe follows the
+# same variable instead of assuming 4000. With PORT unset the shipped
+# default (and the HuggingFace Space's app_port) still applies.
 HEALTHCHECK --interval=30s --timeout=3s \
     CMD python -c "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','4000')+'/health')" || exit 1
+# No CMD: the entrypoint owns the flags. A CMD carrying --port would be the
+# CLI's "explicit flag" and beat PORT (wiwi.main precedence), so a platform
+# injecting PORT would get a container answering on the wrong port.
 ENTRYPOINT ["/app/entrypoint-backend.sh"]
-CMD ["--host", "0.0.0.0", "--port", "4000"]

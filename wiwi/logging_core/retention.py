@@ -140,7 +140,7 @@ class LogRetention:
         Implemented as a row in a tiny ``sweep_locks`` table: a Postgres
         ``pg_advisory_lock`` has no SQLite equivalent, and a file lock does
         not work for a Postgres-backed deployment with several hosts. One
-        mechanism that works on both backends is worth the extra table.
+        mechanism that works on both databases is worth the extra table.
 
         The lock is released by DELETING the row, so a crashed process
         leaves a stale row rather than a held lock; the stale row is

@@ -95,7 +95,6 @@ when `now >= _next_maintenance` or the oldest pending write plus the current
 TTL has elapsed; it then deletes rows older than `now - ttl`, drops the
 satisfied timestamps, and re-arms one pass per TTL. Idle stores still issue no
 SQL (#604), and every row is guaranteed to cross a due boundary after its TTL.
-The same semantics are ported to `wiwi-go/internal/server/response_store.go`.
 
 ## ✅ Fixed — idle background sweepers kept a serverless database awake (2026-11-19)
 

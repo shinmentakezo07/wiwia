@@ -25,9 +25,6 @@ const ENTRIES: ChangelogEntry[] = [
     version: "2026.11",
     date: "November 2026",
     changes: [
-      "Add a full Go port of the gateway, interoperable with Python's shared database",
-      "Add backend selection in Docker (BACKEND=go|py) with the Go playground served from the session cookie",
-      "Match the console's admin API shapes in the Go backend and flush its SSE stream so the console shows LIVE",
       "Add per-key 429 failover to a sibling key without burning retries",
       "Wrap an entitlement refusal to a fallback instead of erroring",
       "Throttle auth attempts per client IP",

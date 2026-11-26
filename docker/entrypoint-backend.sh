@@ -1,33 +1,17 @@
 #!/bin/sh
-# entrypoint-backend.sh — exec the backend selected by BACKEND (go | py).
-# Called from the container's ENTRYPOINT; CMD carries the default positional
-# args for the Python backend and is ignored by the Go branch (its flags are
-# mirrored below). `set -eu` guarantees a missing binary fails the container
-# loudly instead of looping as an unhealthy ghost.
+# entrypoint-backend.sh — exec the Python backend (the only backend).
+# Called from the container's ENTRYPOINT. `set -eu` guarantees a missing binary
+# fails the container loudly instead of looping as an unhealthy ghost.
+#
+# No --port here on purpose: wiwi.main resolves the listen port itself as
+# explicit flag > platform-injected PORT > wiwi.yaml, and a platform that
+# injects PORT (Railway, Render, Fly) must get the gateway on THAT port. An
+# --port passed here would be the "explicit flag" and silently win, leaving
+# the container answering where the platform's edge proxy never looks.
+# WIWI_CONFIG_PATH overrides the default /app/wiwi.yaml.
 set -eu
 
-# Nothing sent (unset, empty, or whitespace-only) means the Python backend.
-# Normalize case too, so GO/Go/PY all work without listing each spelling in
-# the case branches below.
-BACKEND="$(printf '%s' "${BACKEND:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
-[ -n "$BACKEND" ] || BACKEND=py
-PORT="${PORT:-4000}"
 CFG="${WIWI_CONFIG_PATH:-/app/wiwi.yaml}"
 
-case "$BACKEND" in
-    go|golang)
-        echo "==> wiwi: starting Go backend (wiwi-go)"
-        # --config and --port are the Go CLI's only flags (--host does not
-        # exist there); wiwi-go binds 0.0.0.0 by default, which is what the
-        # container needs. --port wins over any config value.
-        exec /app/wiwi-go/bin/wiwi --config "$CFG" --port "$PORT"
-        ;;
-    py|python|python3)
-        echo "==> wiwi: starting Python backend (wiwi)"
-        exec wiwi --config "$CFG" --host 0.0.0.0 --port "$PORT" "$@"
-        ;;
-    *)
-        echo "ERROR: unknown BACKEND '$BACKEND' (use: go | py)" >&2
-        exit 1
-        ;;
-esac
+echo "==> wiwi: starting backend (Python)"
+exec wiwi --config "$CFG" --host 0.0.0.0

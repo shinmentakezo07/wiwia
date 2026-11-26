@@ -28,11 +28,6 @@ wiwi.db
 # the live DB's WAL while a backend holds it open, silently dropping writes.
 wiwi.db-shm
 wiwi.db-wal
-# The Go backend keeps its own database (its schema differs from the Python
-# backend's), so the two implementations never collide on wiwi.db.
-wiwi-go.db
-wiwi-go.db-shm
-wiwi-go.db-wal
 
 # Local opencode agent config (holds live provider keys, e.g. ptcider-alt)
 opencode.json
@@ -70,12 +65,6 @@ web/tsconfig.tsbuildinfo
 wiwi/server/static/
 # Rust implementation (wiwi2) build artifacts
 wiwi2/target/
-
-# Go implementation (wiwi3) build artifacts
-wiwi3/bin/
-
-# Go implementation (wiwi-go) build artifacts
-wiwi-go/bin/
 
 # Agent harness scratch
 .omp/

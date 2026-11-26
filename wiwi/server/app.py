@@ -5994,7 +5994,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         evs = await _request_events()
         if kids is not None:
             evs = [e for e in evs if e.key_id in kids]
-        # minutes=0 is all-time on both backends: stats.overview treats it as
+        # minutes=0 is all-time in both the ring and the DB: stats.overview treats it as
         # "no cutoff" exactly like DBSink.read_overview. Rewriting it to 1440
         # here made the ring answer a different question than the DB for the
         # same request (AUDIT_REPORT M12).
@@ -6023,7 +6023,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
                 evs = [e for e in evs if e.key_id in kids]
             # Same minutes contract as the DB branch above: stats.timeseries
             # derives its width from bucket_size_for and treats 0 as all-time,
-            # so both backends answer one request identically (AUDIT_REPORT M12).
+            # so the ring and the DB answer one request identically (AUDIT_REPORT M12).
             return ORJSONResponse(
                 stats_mod.timeseries(evs, bucket, metric, minutes))
         except ValueError as e:

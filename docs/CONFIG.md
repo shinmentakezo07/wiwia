@@ -294,7 +294,7 @@ cache_settings:
 | Field | Default | Notes |
 |---|---|---|
 | `enabled` | `false` | Response cache is off by default. |
-| `ttl_s` | `3600.0` | Time-to-live for cached responses. `<= 0` disables the cache (never serve, never store) and logs one `response_cache_disabled_by_ttl` warning at startup — identically on both backends. |
+| `ttl_s` | `3600.0` | Time-to-live for cached responses. `<= 0` disables the cache (never serve, never store) and logs one `response_cache_disabled_by_ttl` warning at startup. |
 | `max_entries` | `1024` | LRU eviction cap (memory backend only). |
 | `bypass_header` | `x-wiwi-no-cache` | Send this header to skip the cache for one call. |
 

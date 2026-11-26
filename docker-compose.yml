@@ -27,16 +27,13 @@ services:
       retries: 10
     restart: unless-stopped
 
-  # One image, two backends (Dockerfile builds both). Select with BACKEND in
-  # .env: BACKEND=go (wiwi-go/) or BACKEND=py (wiwi/, the default). No
-  # rebuild needed to switch — `docker compose up -d wiwi` restarts onto the
-  # other binary, both read the same DATABASE_URL and shared schema.
+  # Python backend + the admin SPA it serves. Set env vars to activate
+  # providers; absent keys are filtered out at load time.
   wiwi:
     build: .
     ports: ["4000:4000"]
     env_file: [.env]
     environment:
-      BACKEND: ${BACKEND:-py}
       WIWI_MASTER_KEY: ${WIWI_MASTER_KEY:-sk-wiwi-master-change-me}
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://wiwi:wiwi@postgres:5432/wiwi}
       # Optional: shared response cache. Leave empty to use the in-memory
@@ -65,8 +62,7 @@ services:
       - wiwi_data:/data
       # Uncomment to mount a custom config:
       # - ./wiwi.yaml:/app/wiwi.yaml:ro
-    # Flags live in docker/entrypoint-backend.sh (ENTRYPOINT); the backend
-    # is chosen by BACKEND, not by the command line.
+    # Flags live in docker/entrypoint-backend.sh (ENTRYPOINT).
     depends_on:
       postgres:
         condition: service_healthy
