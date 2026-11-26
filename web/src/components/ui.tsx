@@ -536,6 +536,13 @@ export function Spinner(props: { className?: string }) {
   );
 }
 
+/** Loading placeholder over the shared `.admin-skeleton` shimmer. Decorative
+ *  by construction: a page announces loading through its own `aria-busy`
+ *  region, so the bars themselves stay out of the accessibility tree. */
+export function Skeleton(props: { className?: string }) {
+  return <div aria-hidden className={`admin-skeleton ${props.className ?? ""}`} />;
+}
+
 /** Live-updating indicator pill: pulsing dot + "live" label when connected. */
 export function LiveBadge(props: { connected: boolean }) {
   return (

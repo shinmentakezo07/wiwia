@@ -1,11 +1,11 @@
 // Provider detail — opened from an "Edit" action on a Providers bento card.
-// Three panes: key pool (enable/disable, weights), bulk multi-key add, and
-// model IDs fetched live from the upstream with select-and-attach to a group.
+// One identity band (name, type, endpoint, health, key-status counts), then
+// section bands: keys (pool + add), models (picker + deployments), account.
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Boxes, Briefcase, CheckCircle2, ChevronDown, ChevronUp, Cloud, Cpu, Eye, EyeOff, Globe, KeyRound, Layers, Link2, Loader2, LogIn, Plus, RefreshCw, Search, Server, Sparkles, Sunrise, Trash2, Unlink, X, Zap } from "lucide-react";
+import { ArrowLeft, Boxes, Briefcase, CheckCircle2, ChevronDown, ChevronUp, Cloud, Cpu, Eye, EyeOff, Globe, KeyRound, Layers, Link2, Loader2, LogIn, Plus, RefreshCw, Search, Server, Settings, Sparkles, Sunrise, Trash2, Unlink, X, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
   addDeployment,
@@ -48,10 +48,12 @@ import {
   Dialog,
   EmptyState,
   ErrorText,
+  PageHeader,
   Field,
   Input,
-  PageHeader,
+  SectionHeading,
   Select,
+  Skeleton,
   Spinner,
   Table,
   TD,
@@ -235,7 +237,7 @@ function KeyRow(props: { provider: string; k: PoolKey; models: string[]; onError
                 type="button"
                 onClick={toggleReveal}
                 disabled={reveal.isPending}
-                className="shrink-0 rounded p-1 text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)] disabled:opacity-50"
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 sm:h-8 sm:w-8 disabled:opacity-50"
                 title={revealed ? "Hide key" : "Reveal key"}
                 aria-label={revealed ? "Hide key" : "Reveal key"}
               >
@@ -245,7 +247,7 @@ function KeyRow(props: { provider: string; k: PoolKey; models: string[]; onError
             <button
               type="button"
               onClick={() => setEditingSecret(true)}
-              className="shrink-0 rounded p-1 text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)]"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 sm:h-8 sm:w-8"
               title={props.k.has_secret ? "Replace key" : "Set key — this key has no credential and is disabled"}
               aria-label={props.k.has_secret ? "Replace key" : "Set key"}
             >
@@ -277,8 +279,9 @@ function KeyRow(props: { provider: string; k: PoolKey; models: string[]; onError
           </form>
         ) : (
           <button
-            className="rounded px-1.5 py-0.5 font-mono tabular-nums text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)]"
+            className="min-h-[44px] min-w-[44px] rounded-md px-1.5 font-mono tabular-nums text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 sm:min-h-8 sm:min-w-8"
             title="Click to edit weight"
+            aria-label={`Weight ${props.k.weight}, click to edit`}
             onClick={() => setEditingWeight(true)}
           >
             {props.k.weight}
@@ -291,13 +294,11 @@ function KeyRow(props: { provider: string; k: PoolKey; models: string[]; onError
         </Badge>
       </TD>
       <TD>
+        <div className="flex items-center justify-end gap-1">
         <Button variant="outline" disabled={patch.isPending}
                 onClick={() => patch.mutate({ enabled: !props.k.enabled })}>
           {props.k.enabled ? "Disable" : "Enable"}
         </Button>
-      </TD>
-      <TD>
-        <div className="flex items-center gap-1">
         <Button
           variant="outline"
           disabled={!props.k.has_secret}
@@ -383,13 +384,19 @@ export function KeyPoolCard(props: { p: Provider; providerName: string; onError:
   });
 
   return (
-    <Card className="xl:col-span-3">
+    <Card>
       <CardHeader
+        icon={KeyRound}
         title="Key pool"
+        subtitle={
+          roundRobin
+            ? "Round-robin — each enabled key takes a turn, weighted."
+            : "Sequential — the first healthy key serves until it fails."
+        }
         right={
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2">
-              <span className="text-[11px] text-[var(--admin-text-dim)]">
+              <span className="text-[12px] text-[var(--admin-text-muted)]">
                 {roundRobin ? "round-robin" : "sequential"}
               </span>
               <Toggle
@@ -397,16 +404,18 @@ export function KeyPoolCard(props: { p: Provider; providerName: string; onError:
                 checked={roundRobin}
                 onChange={() => toggleRR.mutate()}
                 disabled={toggleRR.isPending}
+                className="after:absolute after:-inset-3 after:content-['']"
               />
             </div>
-            <Badge tone="blue">{props.p.keys.length} keys</Badge>
           </div>
         }
       />
       {props.p.keys.length === 0 ? (
-        <EmptyState>No keys yet — add some below.</EmptyState>
+        <EmptyState icon={KeyRound} title="No keys in the pool">
+          This account cannot serve requests until it holds at least one key. Add the first one below.
+        </EmptyState>
       ) : (
-        <Table head={["Label", "Key", "Weight", "Status", "Action"]}>
+        <Table head={["Label", "Key", "Weight", "Status", ""]}>
           {props.p.keys.map((k) => (
             <KeyRow key={k.label} provider={props.providerName} k={k} models={models} onError={props.onError} />
           ))}
@@ -456,25 +465,31 @@ function AddKeysCard(props: { provider: string; existing: number; onError: (m: s
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
 
   return (
-    <Card className="self-start">
-      <CardHeader icon={KeyRound} title="Add API keys" subtitle="One row per key." />
+    <Card>
+      <CardHeader
+        icon={Plus}
+        title="Add API keys"
+        subtitle="One row per key. Stored server-side only; masked afterwards."
+      />
       <div className="space-y-3 p-5">
         {rows.map((r, i) => (
-          <div key={i} className="rounded-lg border border-[var(--admin-border)] p-3">
-            <div className="mb-2 flex items-center justify-between">
+          <div key={i} className="rounded-lg border border-[var(--dash-line)] bg-white/[0.01] p-3">
+            {/* Row header: number on the left, remove on the right. Present at
+                every width so the mobile layout has no orphaned dead cell. */}
+            <div className="mb-2 flex h-8 items-center justify-between sm:h-7">
               <span className="admin-label">Key {props.existing + i + 1}</span>
               <button
                 type="button"
                 aria-label={`Remove key row ${i + 1}`}
                 disabled={rows.length === 1}
                 onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}
-                className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--admin-text-dim)] hover:text-[var(--admin-text)] disabled:invisible focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+                className="flex h-11 w-11 items-center justify-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 disabled:invisible sm:h-10 sm:w-10"
               >
-                <X size={13} />
+                <X size={14} />
               </button>
             </div>
-            <div className="flex gap-2">
-              <div className="min-w-0 flex-1">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_5rem_minmax(0,2fr)] sm:items-center sm:gap-3">
+              <div className="min-w-0">
                 <Input
                   value={r.label}
                   aria-label="Key label"
@@ -482,7 +497,7 @@ function AddKeysCard(props: { provider: string; existing: number; onError: (m: s
                   onChange={(e) => update(i, { label: e.target.value })}
                 />
               </div>
-              <div className="w-16 shrink-0">
+              <div className="min-w-0">
                 <Input
                   type="number"
                   min={1}
@@ -492,21 +507,21 @@ function AddKeysCard(props: { provider: string; existing: number; onError: (m: s
                   onChange={(e) => update(i, { weight: e.target.value })}
                 />
               </div>
-            </div>
-            <div className="mt-2">
-              <Input
-                value={r.secret}
-                type="password"
-                autoComplete="off"
-                aria-label="API key"
-                placeholder="sk-…"
-                className="font-mono"
-                onChange={(e) => update(i, { secret: e.target.value })}
-              />
+              <div className="min-w-0">
+                <Input
+                  value={r.secret}
+                  type="password"
+                  autoComplete="off"
+                  aria-label="API key"
+                  placeholder="sk-…"
+                  className="font-mono"
+                  onChange={(e) => update(i, { secret: e.target.value })}
+                />
+              </div>
             </div>
           </div>
         ))}
-        <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
           <Button variant="outline" onClick={() => setRows((rs) => [...rs, emptyRow()])}>
             <Plus size={14} /> Another key
           </Button>
@@ -518,9 +533,6 @@ function AddKeysCard(props: { provider: string; existing: number; onError: (m: s
           </Button>
         </div>
         {save.error && <ErrorText>{save.error.message}</ErrorText>}
-        <p className="text-[11px] text-[var(--admin-text-dim)]">
-          Keys are stored server-side only; masked afterwards.
-        </p>
       </div>
     </Card>
   );
@@ -528,7 +540,7 @@ function AddKeysCard(props: { provider: string; existing: number; onError: (m: s
 
 // -- upstream model fetch + select + attach ----------------------------------------
 
-function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
+function ModelPickerCard(props: { p: Provider; onError: (m: string) => void; className?: string }) {
   const qc = useQueryClient();
   const [models, setModels] = useState<string[] | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
@@ -615,14 +627,14 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
   const sectionLabel = "admin-label mb-2 flex items-center justify-between gap-2";
 
   return (
-    <Card className="xl:col-span-2">
+    <Card className={props.className}>
       <CardHeader
         icon={Layers}
-        title="Models"
+        title="Attach models"
         subtitle={
           props.p.provider_type === "cline"
             ? "Global Cline list, shared across all Cline accounts."
-            : `${deployedHere.size} deployed from this account`
+            : `${deployedHere.size} model${deployedHere.size === 1 ? "" : "s"} already deployed from this account`
         }
         right={
           <Button variant="outline" disabled={fetchM.isPending} onClick={() => fetchM.mutate()}>
@@ -648,7 +660,7 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
           {fetchM.error && <div className="mb-2"><ErrorText>{fetchM.error.message}</ErrorText></div>}
 
           {fetchM.isPending && (
-            <div className="space-y-1.5 rounded-lg border border-[var(--admin-border)] p-2" aria-busy="true">
+            <div className="space-y-1.5 rounded-lg border border-[var(--dash-line)] p-2" aria-busy="true">
               {[0, 1, 2, 3].map((i) => (
                 <div key={i} className="h-7 rounded-md bg-white/[0.03] motion-safe:animate-pulse" />
               ))}
@@ -659,7 +671,7 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
             <button
               type="button"
               onClick={() => fetchM.mutate()}
-              className="flex min-h-[88px] w-full flex-col items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--admin-border-hover)] px-4 text-center transition-colors hover:border-[var(--admin-accent)]/40 hover:bg-white/[0.015] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+              className="flex min-h-[88px] w-full flex-col items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--dash-line-strong)] px-4 text-center transition-colors hover:border-[var(--admin-accent)]/40 hover:bg-white/[0.015] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
             >
               <RefreshCw size={16} className="text-[var(--admin-text-dim)]" aria-hidden />
               <span className="text-[13px] text-[var(--admin-text-muted)]">Fetch model list</span>
@@ -676,8 +688,8 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
           )}
 
           {models !== null && !fetchM.isPending && models.length > 0 && (
-            <div className="overflow-hidden rounded-lg border border-[var(--admin-border)]">
-              <div className="flex items-center gap-2 border-b border-[var(--admin-border)] px-2.5">
+            <div className="overflow-hidden rounded-lg border border-[var(--dash-line)]">
+              <div className="flex items-center gap-2 border-b border-[var(--dash-line)] px-2.5">
                 <Search size={13} className="shrink-0 text-[var(--admin-text-dim)]" aria-hidden />
                 <input
                   value={filter}
@@ -772,7 +784,7 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
         </section>
 
         {/* ── action bar: weight is shared by both paths ────────── */}
-        <div className="flex flex-wrap items-center gap-3 border-t border-[var(--admin-border)] pt-4">
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-[var(--dash-line)] bg-white/[0.01] px-3 py-2.5">
           <label className="flex items-center gap-2 text-[12px] text-[var(--admin-text-muted)]">
             Weight
             <span className="w-20">
@@ -780,10 +792,10 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
                      onChange={(e) => setWeight(e.target.value)} />
             </span>
           </label>
-          <span className="min-w-0 flex-1 whitespace-nowrap text-[11px] text-[var(--admin-text-dim)]">
+          <span className="min-w-[10rem] flex-1 whitespace-nowrap text-[12px] text-[var(--admin-text-dim)]">
             {selected.length > 0
-              ? `${selected.length} selected${selected.length > 1 ? " · added as fallbacks" : ""}`
-              : "Nothing selected"}
+              ? `${selected.length} selected${selected.length > 1 ? " · added as fallbacks of one group" : ""}`
+              : "Nothing selected yet"}
           </span>
           <Button disabled={selected.length === 0 || attach.isPending} onClick={() => attach.mutate()}>
             {attach.isPending
@@ -799,7 +811,7 @@ function ModelPickerCard(props: { p: Provider; onError: (m: string) => void }) {
 
 // -- deployments referencing this account ---------------------------------------------
 
-export function DeploymentsCard(props: { provider: string; onError: (m: string) => void }) {
+export function DeploymentsCard(props: { provider: string; onError: (m: string) => void; className?: string }) {
   const q = useQuery({ queryKey: ["model-groups"], queryFn: getModels });
   const qc = useQueryClient();
   const [pending, setPending] = useState<{ group: string; model_id: string } | null>(null);
@@ -973,17 +985,23 @@ export function DeploymentsCard(props: { provider: string; onError: (m: string) 
   });
 
   return (
-    <Card className="xl:col-span-3">
+    <Card className={props.className}>
       <CardHeader
         icon={Boxes}
         title="Deployments"
-        subtitle="Model groups this account currently serves."
-        right={<Badge tone="blue">{rows.length}</Badge>}
+        subtitle="The model groups this account serves, and the aliases that resolve to them."
+        right={<Badge tone="blue">{rows.length} deployment{rows.length === 1 ? "" : "s"}</Badge>}
       />
       {q.isLoading ? (
-        <Spinner />
+        <div className="space-y-3 p-5" role="status" aria-label="Loading deployments">
+          <Skeleton className="h-9 w-full" />
+          <Skeleton className="h-9 w-full" />
+          <Skeleton className="h-9 w-2/3" />
+        </div>
       ) : rows.length === 0 ? (
-        <EmptyState>Not referenced by any model group yet.</EmptyState>
+        <EmptyState icon={Boxes} title="Not serving any model group">
+          Attach a model from the picker — every deployment is a (model group, model id) pair that routes here.
+        </EmptyState>
       ) : (
         <>
           {poolPeers.length > 0 && (
@@ -1000,7 +1018,7 @@ export function DeploymentsCard(props: { provider: string; onError: (m: string) 
               </ul>
             </div>
           )}
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-[var(--admin-border)] px-4 py-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-[var(--dash-line)] px-4 py-1">
             <label className="flex h-11 cursor-pointer items-center gap-2 rounded-lg px-2 text-[12px] text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]">
               <input
                 ref={selectAllRef}
@@ -1023,7 +1041,7 @@ export function DeploymentsCard(props: { provider: string; onError: (m: string) 
             >
               {selectedTargets.length} selected
             </span>
-            <div className="ml-auto flex items-center gap-2">
+            <div className="ml-auto flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto">
               <Button
                 variant="ghost"
                 disabled={selectedTargets.length === 0 || bulkDetach.isPending}
@@ -1043,13 +1061,15 @@ export function DeploymentsCard(props: { provider: string; onError: (m: string) 
               </Button>
             </div>
           </div>
-          <Table head={["", "Model", "Model ID", "Weight", "Ready", ""]}>
+          <Table head={["", "Model group", "Model ID", "Weight", "Ready", ""]}>
             {(() => {
               const seen = new Set<string>();
               return rows.map((d) => {
                 const isFirst = !seen.has(d.group);
                 const expanded = openGroup === d.group;
                 if (isFirst) seen.add(d.group);
+                // A group's first row carries the group name; later rows of the
+                // same group show an unbroken left rail so the block reads as one.
                 return (
                   <Fragment key={`${d.group}/${d.model_id}`}>
                     <tr>
@@ -1072,17 +1092,36 @@ export function DeploymentsCard(props: { provider: string; onError: (m: string) 
                           />
                         </label>
                       </TD>
-                      <TD className="font-medium">{d.group}</TD>
+                      {/* The group name on the first row of a block; a quiet
+                          rail on its siblings so one group reads as one unit. */}
+                      <TD className={`font-medium ${!isFirst ? "border-l-2 border-l-[var(--dash-line-strong)]" : ""}`}>
+                        {isFirst ? d.group : (
+                          <span className="font-mono text-[12px] text-[var(--admin-text-dim)]">
+                            in {d.group}
+                          </span>
+                        )}
+                      </TD>
                       <TD className="font-mono text-[12px]">{d.model_id}</TD>
                       <TD className="tabular-nums">{d.weight}</TD>
-                      <TD><Badge tone={d.available ? "green" : "amber"}>{d.available ? "yes" : "cooldown"}</Badge></TD>
                       <TD>
-                        <div className="flex items-center gap-1">
+                        <Badge tone={d.available ? "green" : d.probation ? "blue" : "amber"}>
+                          {d.available ? "ready" : d.probation ? "probation" : "cooldown"}
+                        </Badge>
+                        {!d.available && !d.probation && d.cooldown_remaining_s > 0 && (
+                          <span className="ml-1.5 font-mono text-[11px] tabular-nums text-[var(--admin-text-dim)]">
+                            {Math.ceil(d.cooldown_remaining_s)}s
+                          </span>
+                        )}
+                      </TD>
+                      <TD>
+                        <div className="flex items-center justify-end gap-1">
                           <Button
                             variant="ghost"
                             title={expanded ? `Hide aliases for ${d.group}` : `Show aliases for ${d.group}`}
                             aria-label={expanded ? `Hide aliases for ${d.group}` : `Show aliases for ${d.group}`}
                             aria-expanded={expanded}
+                            className={isFirst ? "" : "invisible"}
+                            tabIndex={isFirst ? 0 : -1}
                             onClick={() => {
                               setOpenGroup(expanded ? null : d.group);
                               setDraft({});
@@ -1091,6 +1130,7 @@ export function DeploymentsCard(props: { provider: string; onError: (m: string) 
                             }}
                           >
                             {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                            <span className="hidden md:inline">Aliases</span>
                           </Button>
                           <Button
                             variant="ghost"
@@ -1099,13 +1139,14 @@ export function DeploymentsCard(props: { provider: string; onError: (m: string) 
                             onClick={() => setPending({ group: d.group, model_id: d.model_id })}
                           >
                             <Unlink size={14} />
+                            <span className="hidden md:inline">Detach</span>
                           </Button>
                         </div>
                       </TD>
                     </tr>
                     {expanded && isFirst && (
                       <tr>
-                        <td colSpan={6} className="bg-[var(--admin-bg-raised)] px-4 py-3">
+                        <td colSpan={6} className="border-t border-[var(--dash-line)] bg-black/20 px-4 py-3">
                           <div className="space-y-3">
                             <div>
                               <div className="mb-1 text-[11px] uppercase tracking-wide text-[var(--admin-text-dim)]">
@@ -1328,7 +1369,7 @@ export function DeploymentsCard(props: { provider: string; onError: (m: string) 
           These deployments stop routing to <span className="font-mono">{props.provider}</span>.
           A model group left with no deployments disappears.
         </p>
-        <ul className="mt-3 max-h-48 space-y-0.5 overflow-y-auto rounded-lg border border-[var(--admin-border)] p-2 font-mono text-[12px]">
+        <ul className="mt-3 max-h-48 space-y-0.5 overflow-y-auto rounded-lg border border-[var(--dash-line)] p-2 font-mono text-[12px]">
           {selectedTargets
             .slice()
             .sort((a, b) => `${a.group}/${a.model_id}`.localeCompare(`${b.group}/${b.model_id}`))
@@ -1412,27 +1453,32 @@ export function AccountSettingsCard(props: { p: Provider; onError: (m: string) =
     enabled !== props.p.enabled;
 
   return (
-    <Card className="xl:col-span-3">
-      <CardHeader title="Account settings" subtitle="Rename, change type, base URL, alias id, or availability." />
-      <div className="space-y-3 px-4 pb-4 pt-2">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Field label="Name">
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="openai-backup" />
-          </Field>
-          <Field label="Type">
-            <Select
-              value={type}
-              onChange={setType}
-              options={PROVIDER_TYPE_OPTIONS}
-            />
+    <Card>
+      <CardHeader
+        icon={Settings}
+        title="Account"
+        subtitle="Identity, endpoint, and availability. Changes apply to every deployment on this account."
+      />
+      <div className="grid grid-cols-1 gap-x-5 gap-y-4 p-5 sm:grid-cols-2 lg:grid-cols-4">
+        <Field label="Name">
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="openai-backup" />
+        </Field>
+        <Field label="Type">
+          <Select
+            value={type}
+            onChange={setType}
+            options={PROVIDER_TYPE_OPTIONS}
+            className="w-full"
+          />
+        </Field>
+        <div className="sm:col-span-2">
+          <Field label="Base URL" hint="Optional for every built-in type. Required only for an OpenAI-compatible URL.">
+            <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" className="font-mono" />
           </Field>
         </div>
-        <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud/bai/workbuddy/nvidia-nim/cline/opencode/hermes/ifm. Required for compatible URLs.">
-          <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" />
-        </Field>
         <Field
           label="Alias id"
-          hint="Optional caller-facing alias. Providers sharing an alias form a cross-provider weighted round-robin pool for any model id both serve. Leave blank to clear."
+          hint="Accounts sharing an alias form a cross-provider weighted pool for any model id they both serve."
         >
           <Input
             value={aliasId}
@@ -1441,27 +1487,28 @@ export function AccountSettingsCard(props: { p: Provider; onError: (m: string) =
             className="font-mono"
           />
         </Field>
-        <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--admin-border)] bg-white/[0.01] px-3 py-2.5">
-          <div className="min-w-0">
-            <p className="text-[13px] font-medium text-[var(--admin-text)]">
-              Enabled
-            </p>
-            <p className="text-[11px] text-[var(--admin-text-dim)]">
-              When off, every deployment on this account reports unavailable and
-              no key is selected. Keys and deployments are kept.
-            </p>
+        <div className="flex items-end">
+          <div className="flex w-full items-center justify-between gap-3 rounded-lg border border-[var(--dash-line)] bg-white/[0.01] px-3 py-2.5">
+            <div className="min-w-0">
+              <p className="text-[13px] font-medium text-[var(--admin-text)]">
+                Enabled
+              </p>
+              <p className="text-[11px] text-[var(--admin-text-dim)]">
+                Off: deployments report unavailable. Keys are kept.
+              </p>
+            </div>
+            <Toggle
+              label="Enable provider account"
+              checked={enabled}
+              onChange={setEnabled}
+              className="after:absolute after:-inset-3 after:content-['']"
+            />
           </div>
-          <Toggle
-            label="Enable provider account"
-            checked={enabled}
-            onChange={setEnabled}
-            className="after:absolute after:-inset-3 after:content-['']"
-          />
         </div>
-        {error && <ErrorText>{error}</ErrorText>}
-        <div className="flex justify-end">
+        {error && <div className="sm:col-span-2 lg:col-span-4"><ErrorText>{error}</ErrorText></div>}
+        <div className="flex justify-end sm:col-span-2 lg:col-span-4">
           <Button disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
-            {save.isPending ? "Saving…" : "Save changes"}
+            {save.isPending ? "Saving…" : dirty ? "Save changes" : "Saved"}
           </Button>
         </div>
       </div>
@@ -1604,7 +1651,7 @@ function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
   };
 
   return (
-    <Card className="xl:col-span-3">
+    <Card>
       <CardHeader
         title="Cline OAuth"
         subtitle="tokens live in the first key of the pool"
@@ -1706,7 +1753,7 @@ function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
 
             {/* collapsible paste section — accepts the full Cline callback URL or bare code */}
             {showManual && (
-              <div className="space-y-2 border-t border-[var(--admin-border)] pt-3">
+              <div className="space-y-2 border-t border-[var(--dash-line)] pt-3">
                 <p className="text-[12px] text-[var(--admin-text-muted)]">
                   After logging in at Cline, copy the full URL from the
                   address bar (it starts with https://app.cline.bot/auth/
@@ -1735,7 +1782,7 @@ function ClineOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
 
         {/* refresh + disconnect (only when connected) */}
         {connected && (
-          <div className="space-y-2 border-t border-[var(--admin-border)] pt-3">
+          <div className="space-y-2 border-t border-[var(--dash-line)] pt-3">
             <p className="text-[12px] text-[var(--admin-text-muted)]">
               Refresh rotates the access token and the single-use refresh
               token. Cline tokens auto-refresh in the final 5 minutes before
@@ -1832,7 +1879,7 @@ function HermesOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
   });
 
   return (
-    <Card className="xl:col-span-3">
+    <Card>
       <CardHeader
         title="Hermes OAuth"
         subtitle="Nous Portal · device-code sign-in"
@@ -1896,7 +1943,7 @@ function HermesOAuthCard(props: { p: Provider; onError: (m: string) => void }) {
         )}
 
         {connected && (
-          <div className="flex flex-wrap items-center gap-2 border-t border-[var(--admin-border)] pt-3">
+          <div className="flex flex-wrap items-center gap-2 border-t border-[var(--dash-line)] pt-3">
             <Button variant="ghost" className="min-h-11" onClick={() => void statusQ.refetch()}>
               <RefreshCw size={14} /> Recheck status
             </Button>
@@ -1987,35 +2034,57 @@ export function ProviderDetailPage() {
   const p = q.data?.providers.find((x) => x.name === name);
   const PIcon = p ? providerIcon(p.provider_type) : Server;
 
-  if (q.isLoading) return <Spinner />;
+  if (q.isLoading) {
+    return (
+      <div className="admin-dash" role="status" aria-busy="true" aria-label="Loading provider account">
+        <Skeleton className="mb-3 h-5 w-24" />
+        <Skeleton className="h-40 w-full rounded-2xl" />
+        <Skeleton className="mt-8 h-4 w-16" />
+        <Skeleton className="mt-4 h-64 w-full rounded-xl" />
+      </div>
+    );
+  }
+  const backLink = (
+    <Link
+      to="/console/providers"
+      className="inline-flex min-h-[44px] items-center gap-1.5 rounded-md text-[13px] font-medium text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 sm:min-h-0"
+    >
+      <ArrowLeft size={14} /> Back to providers
+    </Link>
+  );
   if (q.isError) {
     return (
-      <div>
-        <PageHeader title={name} subtitle="Failed to load provider account." />
+      <div className="admin-dash">
+        <div className="mb-3">{backLink}</div>
+        <PageHeader title={name} subtitle="Failed to load the provider account." />
         <ErrorText>{q.error.message}</ErrorText>
-        <Link to="/console/providers"><Button variant="outline"><ArrowLeft size={14} /> Back to providers</Button></Link>
+        <div className="mt-4">
+          <Button variant="outline" onClick={() => void q.refetch()}>Try again</Button>
+        </div>
       </div>
     );
   }
   if (!p) {
     return (
-      <div>
-        <PageHeader title={name} subtitle="Unknown provider account." />
-        <Link to="/console/providers"><Button variant="outline"><ArrowLeft size={14} /> Back to providers</Button></Link>
+      <div className="admin-dash">
+        <div className="mb-3">{backLink}</div>
+        <PageHeader title={name} subtitle="No provider account by this name." />
+        <p className="text-[13px] text-[var(--admin-text-dim)]">
+          It may have been renamed or deleted.
+        </p>
       </div>
     );
   }
 
   const keyCounts = p.keys.reduce(
-    (acc, k) => ({ ...acc, [k.status]: acc[k.status] + 1 }),
+    (acc, k) => {
+      // A key with no secret cannot authenticate whatever its status says;
+      // it is a placeholder and reads as one.
+      const s: PoolKey["status"] = k.has_secret ? k.status : "disabled";
+      return { ...acc, [s]: acc[s] + 1 };
+    },
     { active: 0, cooling: 0, invalid: 0, disabled: 0 } as Record<PoolKey["status"], number>,
   );
-  const stats: { label: string; value: number; dot: string }[] = [
-    { label: "Active", value: keyCounts.active, dot: "bg-emerald-400" },
-    { label: "Cooling", value: keyCounts.cooling, dot: "bg-amber-400" },
-    { label: "Invalid", value: keyCounts.invalid, dot: "bg-red-400" },
-    { label: "Disabled", value: keyCounts.disabled, dot: "bg-zinc-500" },
-  ];
 
   return (
     <div className="admin-dash">
@@ -2025,69 +2094,87 @@ export function ProviderDetailPage() {
       >
         <ArrowLeft size={14} /> Providers
       </Link>
-      <PageHeader
-        title={
-          <span className="flex min-w-0 items-center gap-3">
-            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[var(--admin-border)] bg-white/[0.03]">
-              <PIcon size={18} className="text-[var(--admin-text-muted)]" aria-hidden />
+      {/* ── identity band ─────────────────────────────────────────────────
+          The operator's first question is "is this account serving, and with
+          how many keys" — so health and the pool summary share one surface
+          with the name instead of living in a separate strip below it. */}
+      <section
+        aria-label="Provider account"
+        className="overflow-hidden rounded-2xl border border-[var(--dash-line)] bg-[linear-gradient(180deg,var(--dash-surface-2)_0%,var(--dash-surface)_100%)] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.045),0_8px_30px_-16px_rgba(0,0,0,0.9)]"
+      >
+        <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-4 px-5 py-5 sm:px-6">
+          <div className="flex min-w-0 items-start gap-4">
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-[var(--dash-line-strong)] bg-white/[0.03] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)]">
+              <PIcon size={20} className="text-[var(--admin-text)]" aria-hidden />
             </span>
-            <span className="min-w-0 break-all">{p.name}</span>
-          </span>
-        }
-        subtitle={
-          <span className="flex flex-wrap items-center gap-2">
-            <Badge tone="gray">{p.provider_type}</Badge>
-            {!p.enabled && <Badge tone="amber">disabled</Badge>}
-            <span className="min-w-0 break-all" title={p.base_url || undefined}>
-              {p.base_url || "default endpoint"}
-            </span>
-          </span>
-        }
-        right={
-          <>
-            <div
-              role="status"
-              className="flex min-h-[36px] items-center gap-1.5 rounded-lg border border-[var(--admin-border)] px-2.5"
-            >
-              <span className="relative flex h-2 w-2" aria-hidden>
-                {p.healthy && (
-                  <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-40 motion-safe:animate-ping" />
+            <div className="min-w-0">
+              <h2 className="break-all text-2xl font-semibold tracking-[-0.02em] text-[var(--admin-text)]">
+                {p.name}
+              </h2>
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                <Badge tone="gray">{p.provider_type}</Badge>
+                {!p.enabled && <Badge tone="amber">disabled</Badge>}
+                {p.alias_id && (
+                  <span className="font-mono text-[12px] text-[var(--admin-text-dim)]">
+                    alias <span className="text-[var(--admin-text-muted)]">{p.alias_id}</span>
+                  </span>
                 )}
-                <span className={`relative inline-flex h-2 w-2 rounded-full ${p.healthy ? "bg-emerald-400" : "bg-red-400"}`} />
-              </span>
-              <span className="text-[11px] text-[var(--admin-text-muted)]">
-                {p.healthy ? "Healthy" : "No healthy keys"}
-              </span>
+              </div>
+              <p
+                className="mt-1.5 max-w-full truncate font-mono text-[12px] text-[var(--admin-text-dim)]"
+                title={p.base_url || undefined}
+              >
+                {p.base_url || "default endpoint"}
+              </p>
             </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              role="status"
+              className={`admin-health-pill ${p.healthy ? "is-ok" : p.keys.length === 0 ? "is-warn" : "is-down"}`}
+            >
+              <span className="admin-health-pill-dot" aria-hidden />
+              {p.healthy ? "Healthy" : p.keys.length === 0 ? "No keys" : "No healthy keys"}
+            </span>
             <Button variant="outline" onClick={() => void q.refetch()} disabled={q.isFetching}>
               <RefreshCw size={14} className={q.isFetching ? "motion-safe:animate-spin" : ""} /> Refresh
             </Button>
             <Button variant="danger" onClick={() => setDelOpen(true)}>
               <Trash2 size={14} /> Delete
             </Button>
-          </>
-        }
-      />
-      <dl className="mb-6 grid grid-cols-2 overflow-hidden rounded-xl border border-[var(--admin-border)] sm:grid-cols-5">
-        <div className="col-span-2 border-b border-[var(--admin-border)] px-4 py-3 sm:col-span-1 sm:border-b-0 sm:border-r">
-          <dt className="admin-label">Keys</dt>
-          <dd className="m-0 mt-1 text-xl font-semibold tabular-nums text-[var(--admin-text)]">{p.keys.length}</dd>
+          </div>
         </div>
-        {stats.map((s, i) => (
-          <div
-            key={s.label}
-            className={`px-4 py-3 ${i % 2 === 0 ? "border-r" : ""} ${i < 2 ? "border-b sm:border-b-0" : ""} ${i < 3 ? "sm:border-r" : "sm:border-r-0"} border-[var(--admin-border)]`}
-          >
-            <dt className="admin-label flex items-center gap-1.5">
-              <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} aria-hidden /> {s.label}
-            </dt>
-            <dd className={`m-0 mt-1 text-xl font-semibold tabular-nums ${s.value ? "text-[var(--admin-text)]" : "text-[var(--admin-text-dim)]"}`}>
-              {s.value}
+        {/* Pool summary: the figures the key table would make you count. */}
+        <dl className="grid grid-cols-2 border-t border-[var(--dash-line)] sm:grid-cols-5">
+          {/* Mobile: Keys spans the top row, the four statuses sit in a 2×2
+              under it. sm+: five equal cells split by hairlines. */}
+          <div className="col-span-2 border-b border-[var(--dash-line)] px-5 py-3.5 sm:col-span-1 sm:border-b-0 sm:border-r sm:px-6">
+            <dt className="admin-label">Keys</dt>
+            <dd className="m-0 mt-1 text-[26px] font-medium leading-none tracking-[-0.03em] tabular-nums text-[#f5f5f6]">
+              {p.keys.length}
             </dd>
           </div>
-        ))}
-      </dl>
-      {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
+          {[
+            { label: "Active", value: keyCounts.active, dot: "bg-emerald-400" },
+            { label: "Cooling", value: keyCounts.cooling, dot: "bg-amber-400" },
+            { label: "Invalid", value: keyCounts.invalid, dot: "bg-red-400" },
+            { label: "Disabled", value: keyCounts.disabled, dot: "bg-zinc-500" },
+          ].map((s, i) => (
+            <div
+              key={s.label}
+              className={`px-5 py-3.5 sm:px-6 ${i < 2 ? "border-b sm:border-b-0" : ""} ${i % 2 === 0 ? "border-r" : ""} ${i < 3 ? "sm:border-r" : ""} border-[var(--dash-line)]`}
+            >
+              <dt className="admin-label flex items-center gap-1.5">
+                <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} aria-hidden /> {s.label}
+              </dt>
+              <dd className={`m-0 mt-1 text-[26px] font-medium leading-none tracking-[-0.03em] tabular-nums ${s.value ? "text-[#f5f5f6]" : "text-[var(--admin-text-dim)]"}`}>
+                {s.value}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+      {error && <div className="mt-4"><ErrorText>{error}</ErrorText></div>}
       <Dialog open={delOpen} title={`Delete provider ${p.name}?`} onClose={() => setDelOpen(false)}>
         <p className="text-[13px] text-[var(--admin-text-muted)]">
           This removes the account and all its keys from the live pool. Any
@@ -2107,14 +2194,24 @@ export function ProviderDetailPage() {
           </Button>
         </div>
       </Dialog>
-      <div className="admin-stagger grid grid-cols-1 gap-4 xl:grid-cols-3">
+      {/* ── section bands ────────────────────────────────────────────────
+          Three ranked bands replace the flat six-card wall: what serves
+          (keys), what it serves (models), and how the account is configured. */}
+      <SectionHeading label="Keys" hint="Credentials in the pool. Higher-weight keys are picked more often." />
+      <div className="admin-stagger grid grid-cols-1 gap-4">
+        <KeyPoolCard p={p} providerName={name} onError={setError} />
+        <AddKeysCard provider={p.name} existing={p.keys.length} onError={setError} />
+      </div>
+      <SectionHeading label="Models" hint="Fetch the upstream list to attach, or type an id. Each attachment is one deployment." />
+      <div className="admin-stagger grid grid-cols-1 gap-4">
+        <ModelPickerCard p={p} onError={setError} />
+        <DeploymentsCard provider={p.name} onError={setError} />
+      </div>
+      <SectionHeading label="Account" />
+      <div className="admin-stagger grid grid-cols-1 gap-4">
         <AccountSettingsCard p={p} onError={setError} />
         {p.provider_type === "cline" && <ClineOAuthCard p={p} onError={setError} />}
         {p.provider_type === "hermes" && <HermesOAuthCard p={p} onError={setError} />}
-        <KeyPoolCard p={p} providerName={name} onError={setError} />
-        <AddKeysCard provider={p.name} existing={p.keys.length} onError={setError} />
-        <ModelPickerCard p={p} onError={setError} />
-        <DeploymentsCard provider={p.name} onError={setError} />
       </div>
     </div>
   );
