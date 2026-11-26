@@ -215,6 +215,68 @@ def coerce_float(value: Any) -> float | None:
     return None
 
 
+def wire_bool(value: Any) -> bool:
+    """True only for the two spellings the wire protocols define: a real
+    boolean, or the integer ``1``.
+
+    The streaming flags are booleans on every dialect, but ``bool(...)``
+    accepted any truthy junk a client sent (``"false"``, ``"true"``, ``[1]``)
+    and turned it into a live SSE stream the caller did not ask for — or,
+    worse, turned a ``"false"`` into a stream. A string or container is a
+    client bug, not a request to stream (round 213).
+    """
+    if value is True:
+        return True
+    return isinstance(value, int) and value == 1
+
+
+def wire_bool_opt(value: Any) -> bool | None:
+    """``wire_bool`` for optional wire fields: ``None`` when absent or
+    malformed, else the strict boolean.
+
+    ``Tool.strict`` and ``ResponseFormat.strict`` are optional booleans;
+    forwarding a malformed value (``"yes"``) verbatim put it on the upstream
+    body, which 400s naming nothing the caller can find in their request.
+    ``None`` means "not set" — the adapters omit the key — while ``False``
+    is a real, forwarded ``false`` (round 213).
+    """
+    if value is None:
+        return None
+    if not (isinstance(value, bool)
+            or (isinstance(value, int) and value in (0, 1))):
+        return None
+    return wire_bool(value)
+
+
+def inclusive_prompt(prompt: int, cached: int,
+                     cached_in_prompt: bool | None) -> int:
+    """Prompt count in the OpenAI convention: cache reads INCLUDED in the
+    total.
+
+    ``cached_in_prompt=False`` (an Anthropic-shaped upstream) means
+    *prompt* excludes them, so the cached count is added. ``None`` means the
+    decoder recorded no convention and no deployment hint exists: emit
+    verbatim rather than shift the total on a guess — an invented re-base
+    billed the caller's cache reads into the prompt (round 213).
+    """
+    if cached_in_prompt is None:
+        return prompt
+    return prompt + (0 if cached_in_prompt else cached)
+
+
+def exclusive_prompt(prompt: int, cached: int,
+                     cached_in_prompt: bool | None) -> int:
+    """Prompt count in the Anthropic convention: cache reads EXCLUDED.
+
+    ``cached_in_prompt=True`` (an OpenAI-shaped upstream) means *prompt*
+    includes them, so the cached count is subtracted. ``None`` — verbatim,
+    for the same reason as ``inclusive_prompt``.
+    """
+    if cached_in_prompt is None:
+        return prompt
+    return prompt - (cached if cached_in_prompt else 0)
+
+
 def _log_unmapped(raw: str) -> None:
     """Log an unmapped finish reason once per distinct value, up to the cap."""
     if raw in _UNMAPPED_LOGGED:

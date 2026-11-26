@@ -115,8 +115,8 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
         model=model,
         messages=[ir.Message(role="user", parts=[ir.TextPart(text)])],
         gen_params=g,
-        stream=bool(body.get("stream")),
-        stream_options_include_usage=bool(stream_opts.get("include_usage", False)),
+        stream=tr.wire_bool(body.get("stream")),
+        stream_options_include_usage=tr.wire_bool(stream_opts.get("include_usage")),
         extras=tr.carry_extras(body, _KNOWN_KEYS),
     )
 
@@ -138,7 +138,8 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
     # prompt INCLUDING cached tokens; an Anthropic-shaped upstream reports
     # input_tokens EXCLUSIVE of cache reads. Re-emit in the OpenAI convention
     # the caller of this surface parses.
-    prompt_incl = u.prompt_tokens + (0 if u.cached_in_prompt else u.cached_tokens)
+    prompt_incl = tr.inclusive_prompt(u.prompt_tokens, u.cached_tokens,
+                                      u.cached_in_prompt)
     return {
         "id": f"cmpl-{req_id}", "object": "text_completion",
         "created": int(time.time()), "model": model,
@@ -232,7 +233,8 @@ class CompletionStreamEncoder:
             # Usage convention re-base (the sync twin's rule): OpenAI totals
             # the prompt INCLUDING cached tokens; an Anthropic-shaped upstream
             # reports input_tokens EXCLUSIVE of cache reads.
-            prompt_incl = u.prompt + (0 if u.cached_in_prompt else u.cached)
+            prompt_incl = tr.inclusive_prompt(u.prompt, u.cached,
+                                              u.cached_in_prompt)
             out += sse_frame("", orjson.dumps({
                 **self._chunk,
                 "usage": {"prompt_tokens": prompt_incl,

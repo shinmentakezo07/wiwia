@@ -152,6 +152,25 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         parts.append(ir.DocumentPart(
                             url=raw_url, name=name, context=context,
                             cache_control=b.get("cache_control")))
+                    elif src.get("type") == "file":
+                        # Files-API reference. The image arm above decoded its
+                        # ``file`` source; this arm did not, so a document the
+                        # caller attached by id was dropped whole — the PDF,
+                        # its title and its cache breakpoint — with no warning,
+                        # and the model answered without it. The IR
+                        # (``DocumentPart.file_id``) and the adapter's native
+                        # re-emit already existed; only this decode was missing
+                        # (round 198 did the same for the Responses surface).
+                        raw_fid = src.get("file_id")
+                        if not isinstance(raw_fid, str) or not raw_fid:
+                            # No id means no source at all: the adapter would
+                            # re-render it as a base64 document with
+                            # ``"data": null`` — the same bogus block the image
+                            # arm drops (AUDIT #168).
+                            continue
+                        parts.append(ir.DocumentPart(
+                            file_id=raw_fid, name=name, context=context,
+                            cache_control=b.get("cache_control")))
                 elif btype == "tool_use":
                     raw_name = b.get("name")
                     raw_id = b.get("id")
@@ -387,7 +406,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                 # the same empty-object default the missing-schema case gets.
                 parameters_json_schema=(raw_schema if isinstance(raw_schema, dict)
                                         else {"type": "object"}),
-                strict=t.get("strict"),
+                strict=tr.wire_bool_opt(t.get("strict")),
                 input_examples=t.get("input_examples"),
                 defer_loading=t.get("defer_loading"),
                 cache_control=t.get("cache_control")))
@@ -465,7 +484,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             json_schema=(raw_oc_schema if isinstance(raw_oc_schema, dict)
                          else {"type": "object"}),
             name=(raw_oc_name if isinstance(raw_oc_name, str) else None),
-            strict=oc_fmt.get("strict"))
+            strict=tr.wire_bool_opt(oc_fmt.get("strict")))
     # output_config.effort is where Claude Code's /effort command, the effort
     # slider, --effort and CLAUDE_CODE_EFFORT_LEVEL all land. Only ``format``
     # used to be read and ``output_config`` was not in _PASSTHROUGH_KEYS, so
@@ -552,7 +571,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
     _note_unmodelled_params(body, extras)
     return ir.Request(model=body["model"], messages=messages, tools=tools,
                       tool_choice=tool_choice, gen_params=g,
-                      stream=bool(body.get("stream")),
+                      stream=tr.wire_bool(body.get("stream")),
                       extras=extras)
 
 
@@ -699,7 +718,8 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
     # them (cached_in_prompt=True). Emitting that verbatim made a Claude Code
     # context meter count the cached tokens twice — over by exactly the
     # cached amount on every turn after the first.
-    input_excl = u.prompt_tokens - (u.cached_tokens if u.cached_in_prompt else 0)
+    input_excl = tr.exclusive_prompt(u.prompt_tokens, u.cached_tokens,
+                                     u.cached_in_prompt)
     return {
         "id": f"msg_{req_id}", "type": "message", "role": "assistant",
         "model": model, "content": content,
@@ -745,6 +765,12 @@ class AnthropicStreamEncoder:
         # Signature seen while no thinking block is open (cross-provider quirk);
         # flushed into the next thinking block right before it closes.
         self._pending_sig: str | None = None
+        # True while the OPEN thinking block has already received its
+        # signature. Anthropic signs a block at its end, so this is the block
+        # boundary the encoder can see: the adapter forwards no
+        # ``content_block_stop`` for thinking blocks, and without this flag a
+        # second signed block was appended to the first.
+        self._signed_open_think = False
         # Block index of the most recent thinking block, so a late pending
         # signature stamps the RIGHT block — never a later thinking block.
         self._last_think_idx: int | None = None
@@ -824,6 +850,7 @@ class AnthropicStreamEncoder:
                     "delta": {"type": "signature_delta",
                               "signature": self._pending_sig}}))
                 self._pending_sig = None
+            self._signed_open_think = False
         out.append(self._evt("content_block_stop",
                              {"type": "content_block_stop", "index": idx}))
         return out
@@ -836,18 +863,41 @@ class AnthropicStreamEncoder:
         coalesce into one block, so text-then-thinking yields two blocks and
         thinking-then-text yields two, matching how the real API interleaves
         content around a tool call.
+
+        A thinking run additionally ends at each signature: the signature is
+        the block's closing marker (Anthropic signs at block end), so two
+        signed blocks buffered behind one tool call must come out as two
+        blocks, each with its own signature — not one block whose first
+        signature was overwritten by the second.
         """
         if not self._deferred:
             return []
         out: list[bytes] = []
         for kind, text, sig in self._deferred:
-            if self._open_block != kind:
+            if kind == "redacted_thinking":
+                # Self-contained: start + data + stop. Never left open, and
+                # never coalesced with a neighbour — it defers only to keep
+                # its arrival order behind the tool group that blocked it.
+                out.extend(self._close_block())
+                out.append(self._evt("content_block_start", {
+                    "type": "content_block_start", "index": self._block_idx,
+                    "content_block": {"type": "redacted_thinking",
+                                      "data": text}}))
+                out.append(self._evt("content_block_stop",
+                                     {"type": "content_block_stop",
+                                      "index": self._block_idx}))
+                self._block_idx += 1
+                continue
+            opens_new = (self._open_block != kind
+                         or (kind == "thinking" and self._signed_open_think))
+            if opens_new:
                 out.extend(self._close_block())
                 out.append(self._evt("content_block_start", {
                     "type": "content_block_start", "index": self._block_idx,
                     "content_block": {"type": kind,
                                       kind if kind == "thinking" else "text": ""}}))
                 self._open_block = kind
+                self._signed_open_think = False
                 self._block_idx += 1
             if kind == "thinking":
                 thd = self._think_delta
@@ -856,6 +906,7 @@ class AnthropicStreamEncoder:
                 out.append(self._evt("content_block_delta", thd))
                 if sig:
                     self._pending_sig = sig
+                    self._signed_open_think = True
             else:
                 td = self._text_delta
                 td["index"] = self._block_idx - 1
@@ -911,16 +962,17 @@ class AnthropicStreamEncoder:
                     self._deferred.appendleft((k, t[-keep:], s))
                     total += keep
                 break
-        # A fully-evicted entry leaves nothing to emit; drop empties so the
-        # flush loop never opens a block with no content. Scoped to the only
-        # way an empty entry can appear — a caller passing ``text == ""``.
-        # Eviction cannot create one (``t[-keep:]`` with ``keep > 0`` is
-        # non-empty, and the ``popleft`` above removes rather than empties),
-        # so testing the incoming text is equivalent to re-scanning the whole
-        # buffer on every append — which cost ~975 us at the 32 768-record cap
-        # and kept ``_defer`` quadratic regardless of the running total.
-        if not text:
-            self._deferred = deque(e for e in self._deferred if e[1])
+        # An entry with neither text nor signature leaves nothing to emit;
+        # drop empties so the flush loop never opens a block with no content.
+        # A signature-only entry is meaningful — it ends a buffered thinking
+        # run — so it survives. Eviction cannot create an empty
+        # (``t[-keep:]`` with ``keep > 0`` is non-empty, and ``popleft``
+        # removes rather than empties), so testing the incoming entry is
+        # equivalent to re-scanning the whole buffer on every append — which
+        # cost ~975 us at the 32 768-record cap and kept ``_defer``
+        # quadratic regardless of the running total.
+        if not text and not sig:
+            self._deferred = deque(e for e in self._deferred if e[1] or e[2])
         self._deferred_chars = total
 
     def _drain_deferred(self) -> list[bytes]:
@@ -1001,7 +1053,8 @@ class AnthropicStreamEncoder:
             # INCLUDES them. StreamStart carries no convention flag (the
             # Anthropic upstream is the only one that reports here), so a
             # known _cached_in_prompt=True re-bases; otherwise verbatim.
-            prompt0 = d.prompt - (d.cached if self._cached_in_prompt else 0)
+            prompt0 = tr.exclusive_prompt(d.prompt, d.cached,
+                                          self._cached_in_prompt)
             return self._evt("message_start", {
                 "type": "message_start",
                 "message": {"id": f"msg_{self.req_id}", "type": "message",
@@ -1043,6 +1096,14 @@ class AnthropicStreamEncoder:
                 # Anthropic redacted thinking: emit the opaque block verbatim so
                 # the client can replay it on the next turn. The blob must not
                 # be merged into a thinking/text block (AUDIT #103).
+                if self._open_block == "tool":
+                    # Behind an open tool group the redacted block defers
+                    # like interleaved text: emitting it in place would close
+                    # the tool's block mid-arguments, and its later fragments
+                    # would land on no block at all. The flush emits it as
+                    # its own self-contained block once the group closes.
+                    self._defer("redacted_thinking", d.data or "", None)
+                    return None
                 out = []
                 if self._open_block is not None:
                     out.extend(self._close_block())
@@ -1055,11 +1116,33 @@ class AnthropicStreamEncoder:
                                      {"type": "content_block_stop",
                                       "index": self._block_idx - 1}))
                 return b"".join(out)
+            # A signature arriving behind an open tool block belongs to the
+            # buffered thinking run, not to a block the client has not seen
+            # open: defer it with the run so the flush ends the run there,
+            # exactly as the live path above ends a signed block on the wire.
+            if self._open_block == "tool":
+                self._defer("thinking", d.text, d.signature)
+                return None
             if not d.text and d.signature:
                 if self._open_block == "thinking":
                     sd = self._sig_delta
                     sd["index"] = self._block_idx - 1
                     sd["delta"]["signature"] = d.signature
+                    # Anthropic sends ``signature_delta`` at a block's END, so
+                    # the signature closes this thinking block: any further
+                    # thinking text belongs to a NEW block. Recording it here
+                    # is what the text arm below keys on — without it, two
+                    # consecutive signed blocks fused into one and the second
+                    # signature was stamped over text the first one signed,
+                    # which Anthropic rejects on replay. ``_last_think_idx``
+                    # is set for the same reason it is set in ``_close_block``:
+                    # a later orphan signature must target this block.
+                    self._signed_open_think = True
+                    self._last_think_idx = sd["index"]
+                    # The signature has now been emitted for this block: drop
+                    # any one buffered by the text+signature shape, or the
+                    # close would emit it a second time.
+                    self._pending_sig = None
                     return self._evt("content_block_delta", sd)
                 # No thinking block open: buffer instead of stamping a signature
                 # onto a nonexistent (or wrong-type) block.
@@ -1072,6 +1155,12 @@ class AnthropicStreamEncoder:
                 self._defer("thinking", d.text, d.signature)
                 return None
             out = []
+            if self._open_block == "thinking" and self._signed_open_think:
+                # The open block already carries its signature (see above), so
+                # this text is a new block's. Close the signed one first — the
+                # same thing a ``content_block_stop`` would do, which the
+                # adapter deliberately does not forward for thinking blocks.
+                out.extend(self._close_block())
             if self._open_block != "thinking":
                 out.extend(self._close_block())
                 # A signature pending from a PREVIOUS thinking block belongs to
@@ -1081,14 +1170,18 @@ class AnthropicStreamEncoder:
                     "type": "content_block_start", "index": self._block_idx,
                     "content_block": {"type": "thinking", "thinking": ""}}))
                 self._open_block = "thinking"
+                self._signed_open_think = False
                 self._block_idx += 1
             thd = self._think_delta
             thd["index"] = self._block_idx - 1
             thd["delta"]["thinking"] = d.text
             out.append(self._evt("content_block_delta", thd))
-            # Preserve signature if both text and signature arrived together
+            # Preserve signature if both text and signature arrived together.
+            # A delta carrying both opens AND signs its block, so the next
+            # thinking text starts a new one (OpenRouter's per-part shape).
             if d.signature:
                 self._pending_sig = d.signature
+                self._signed_open_think = True
             return b"".join(out)
         if isinstance(d, dl.ToolCallOpen):
             # A provider-hosted call (web_search, tool_search, an MCP tool) is
@@ -1319,7 +1412,7 @@ class AnthropicStreamEncoder:
         u = self._usage or dl.UsageFinal()
         # Usage convention re-base (see the sync twin): Messages input_tokens
         # EXCLUDES cache reads; an OpenAI-shaped upstream's INCLUDES them.
-        input_excl = u.prompt - (u.cached if u.cached_in_prompt else 0)
+        input_excl = tr.exclusive_prompt(u.prompt, u.cached, u.cached_in_prompt)
         return out + self._evt("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": self._stop, "stop_sequence": self._stop_seq},

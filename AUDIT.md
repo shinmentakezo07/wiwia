@@ -1306,3 +1306,165 @@ console marks such keys `no secret` in both provider views and the pool's
 "active" count excludes them.
 
 ---
+
+## 🟠 Fixed — round 213 sweep 2026-11-26 (wire/IR audit: eleven decode/fold defects)
+
+Full detail per fix: `tests/test_fix_round213.py` (57 tests). Translation notes:
+UPDATE.md "Round 213".
+
+### 604. An Anthropic `document` block attached by Files-API `file_id` was dropped whole
+
+**Severity:** 🔴 High · **Status: fixed** — round 213
+(`tests/test_fix_round213.py::test_anthropic_document_file_id_decodes_to_a_document_part`)
+**Files:** `wiwi/wire/anthropic_messages.py` (`decode_request`, document arm)
+
+**Trigger:** `{"type": "document", "source": {"type": "file", "file_id": "file-abc"}}`
+in a Messages request. The base64 and url arms decoded; the `file` arm did not, so
+the PDF, its title and its cache breakpoint vanished with no warning and the model
+answered without it. The IR (`DocumentPart.file_id`) and the adapter's native
+re-emit already existed; round 198 fixed the same arm on the Responses surface.
+A source with no usable id is dropped — re-rendering it would have emitted a
+base64 document with `"data": null` (the bogus block AUDIT #168's image arm drops).
+
+### 605. A signature did not end a thinking block — the Anthropic encoder fused consecutive signed blocks
+
+**Severity:** 🔴 High · **Status: fixed** — round 213
+(`test_two_signed_thinking_blocks_stay_two_blocks`, and the deferred/live twins)
+**Files:** `wiwi/wire/anthropic_messages.py` (`AnthropicStreamEncoder`)
+
+**Trigger:** two consecutive signed blocks from a thinking-enabled upstream
+(OpenRouter emits per-part signatures; Anthropic signs at block end). The encoder
+treated an open thinking block as continuing until some other delta type arrived,
+so the second block's text was appended to the first and the second signature
+stamped over the first — a shape Anthropic rejects on replay. **Fix:** a signature
+closes the open block (`_signed_open_think`); further thinking text opens a new
+one, live, in the deferred flush (a thinking run splits at each signature), and a
+signature-only delta arriving behind an open tool block now defers with the run
+instead of riding `_pending_sig` into the wrong block. `_defer` keeps
+signature-only entries (they are a run boundary, not empties).
+
+### 606. The resume tape and the force-stream turn fused thinking blocks the same way
+
+**Severity:** 🔴 High · **Status: fixed** — round 213
+(`test_tape_folds_a_thinking_run_at_each_signature`, `test_force_stream_fold_keeps_thinking_blocks_separate`)
+**Files:** `wiwi/streaming/resume.py` (`fold_thinking_parts`, new —
+`StreamTape.replay_thinking_parts` delegates), `wiwi/core/gateway.py`
+(`_complete_via_stream`)
+
+**Trigger:** any continuation or `force_stream` non-streaming call whose stream
+carried two signed thinking blocks. Both folds recorded the signature without
+ending the run: the tape produced one part whose signature was the second one's,
+and the gateway's `_complete_via_stream` joined every block into a single
+unsigned `ThinkingPart`. A redacted blob survived the tape but not the gateway.
+**Fix:** one shared fold (`fold_thinking_parts`) — signature ends the run,
+redacted is its own opaque block, other content deltas are boundaries — used by
+both sites so they cannot drift.
+
+### 607. `redacted_thinking` closed an open tool block mid-arguments
+
+**Severity:** 🟠 Medium · **Status: fixed** — round 213
+(`test_redacted_thinking_does_not_close_an_open_tool_block`)
+**Files:** `wiwi/wire/anthropic_messages.py` (`AnthropicStreamEncoder`)
+
+**Trigger:** a redacted block between two `input_json_delta` fragments of one
+tool call. The redacted arm closed the open tool block unconditionally, so the
+remaining fragments landed on no block at all and the client rendered the tool
+with truncated arguments. **Fix:** behind an open tool group the blob defers like
+interleaved text and the flush emits it as its own self-contained block in
+arrival order.
+
+### 608. Responses streamed logprobs kept only the last frame
+
+**Severity:** 🟠 Medium · **Status: fixed** — round 213
+(`test_responses_stream_merges_logprobs_across_frames`)
+**Files:** `wiwi/wire/openai_responses.py` (`ResponsesStreamEncoder`),
+`wiwi/streaming/deltas.py` (`merge_logprobs`, moved from
+`wiwi/core/gateway.py`)
+
+**Trigger:** any stream with more than one `LogprobsDelta` (one arrives per
+token). The encoder stashed each frame with `=`, so the terminal
+`response.completed` carried logprobs for the final token only, and
+`rebuild_stored_payload` with it. **Fix:** the gateway's merge (list members
+concatenate, scalars keep first) moved to `deltas.merge_logprobs` and both
+reassembly arms call it — one implementation, no drift.
+
+### 609. A reasoning-only Responses turn emitted an empty `message` item
+
+**Severity:** 🟠 Medium · **Status: fixed** — round 213
+(`test_responses_sync_reasoning_only_turn_emits_no_empty_message`)
+**Files:** `wiwi/wire/openai_responses.py` (`encode_response`)
+
+**Trigger:** an Anthropic thinking turn served to a Responses client with no
+text. The sync arm appended a message whenever the turn had no tool calls, so
+the output carried a `""` content item the stream arm never emits — and a
+replay round-trip fed it back as history. **Fix:** a message rides along when
+there is text, or when the turn is empty (the client needs some output);
+reasoning-only and tool-only turns carry their real items only.
+
+### 610. `stream` / `include_usage` accepted truthy junk
+
+**Severity:** 🟠 Medium · **Status: fixed** — round 213
+(`test_stream_flag_ignores_a_string_false_on_every_surface`)
+**Files:** `wiwi/wire/openai_chat.py`, `openai_completions.py`,
+`openai_responses.py`, `anthropic_messages.py`; `wiwi/ir/translation.py`
+(`wire_bool`, new)
+
+**Trigger:** `"stream": "false"` (or `"true"`, `[1]`) on any of the four
+surfaces — `bool(...)` turned the string into a live SSE stream the caller did
+not ask for. Same for `stream_options.include_usage` on the two OpenAI
+surfaces. **Fix:** `tr.wire_bool` honours only the two spellings the wire
+defines, `true` and `1`.
+
+### 611. Legacy `functions` / `function_call` rode `extras` to the upstream a second time
+
+**Severity:** 🔴 High · **Status: fixed** — round 213
+(`test_legacy_functions_do_not_ride_extras`)
+**Files:** `wiwi/wire/openai_chat.py` (`_KNOWN_KEYS`)
+
+**Trigger:** a legacy Chat client sending `functions` (or `function_call`).
+Both were decoded into `tools`/`tool_choice` **and** forwarded verbatim through
+extras, so an OpenAI upstream received two conflicting tool declarations.
+**Fix:** both keys are known — decoded, not forwarded.
+
+### 612. A replayed Chat refusal was dropped, emptying the turn
+
+**Severity:** 🔴 High · **Status: fixed** — round 213
+(`test_chat_assistant_refusal_field_decodes_as_text`)
+**Files:** `wiwi/wire/openai_chat.py` (`decode_request`)
+
+**Trigger:** a client echoing an OpenAI content-filter turn back
+(`"content": null, "refusal": "I can't help with that"`). The decoder ignored
+both the message-level `refusal` and the `{"type": "refusal"}` content item, so
+the assistant turn reached the model empty. **Fix:** both spellings decode to
+a `TextPart` — the same place the adapters already put an upstream refusal —
+assistant-role only, appended after content and before tool calls. Typed-wrong
+refusals are ignored; a `refusal` on a user message is not history.
+
+### 613. `strict` forwarded malformed values verbatim
+
+**Severity:** 🟠 Medium · **Status: fixed** — round 213
+(`test_strict_typed_wrong_is_dropped_on_every_surface`)
+**Files:** all four wire codecs (tool + response_format sites);
+`wiwi/ir/translation.py` (`wire_bool_opt`, new)
+
+**Trigger:** `"strict": "yes"` on a tool or a json_schema response format on
+any surface — the value rode to the upstream body, which 400s naming nothing
+the caller sent. **Fix:** `tr.wire_bool_opt` normalises: `None` when absent or
+malformed, real booleans and `0`/`1` forwarded as-is, at all six decode sites.
+
+### 614. An unknown usage convention was re-based anyway
+
+**Severity:** 🟠 Medium · **Status: fixed** — round 213
+(`test_unknown_usage_convention_is_emitted_verbatim`)
+**Files:** all four wire codecs, sync + stream (nine sites);
+`wiwi/ir/translation.py` (`inclusive_prompt`/`exclusive_prompt`, new)
+
+**Trigger:** `cached_in_prompt=None` — the decoder recorded no convention, and
+the codec has no deployment to infer from. The add-direction sites treated
+`None` as `False` and added the cached count to the prompt (120+100=220), an
+invented re-base that billed cache reads into the prompt. **Fix:** the
+convention pair moved to `translation.py` with an explicit `None` → verbatim
+rule; the subtract-direction sites migrate to the same helpers so the
+convention has one implementation.
+
+---

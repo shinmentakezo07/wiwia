@@ -33,6 +33,59 @@ class TapeEntry:
     delta: dl.IRStreamDelta
 
 
+def fold_thinking_parts(deltas) -> list:
+    """Fold a delta sequence into structured ThinkingParts.
+
+    THE thinking-block fold, shared by the resume tape
+    (``StreamTape.replay_thinking_parts``) and the force-stream turn
+    (``Gateway._complete_via_stream``): consecutive ThinkingDeltas form one
+    block, a delta carrying a signature ENDS it (Anthropic signs at block
+    end, so two signed blocks must not fuse into one part whose signature
+    is the second one's), a ``redacted_thinking`` delta is its own opaque
+    block, and any other delta — or an explicit ``None`` a caller feeds as
+    a boundary — ends the run. A bare-text part drops signatures, and a
+    signed thinking block replayed without its signature 400s upstream
+    (AUDIT #118).
+    """
+    from wiwi.ir import types as ir
+
+    parts: list[ir.ThinkingPart] = []
+    text_bits: list[str] = []
+    signature: str | None = None
+
+    def _flush() -> None:
+        nonlocal text_bits, signature
+        joined = "".join(text_bits)
+        if joined:
+            parts.append(ir.ThinkingPart(joined, signature=signature))
+        text_bits = []
+        signature = None
+
+    for d in deltas:
+        if not isinstance(d, dl.ThinkingDelta):
+            # A content delta ends the thinking run: the next thinking
+            # delta opens a NEW block whose signature must not be glued
+            # onto the previous run's text.
+            _flush()
+            continue
+        if d.block_type == "redacted_thinking":
+            _flush()
+            parts.append(ir.ThinkingPart("", block_type="redacted_thinking",
+                                         data=d.data))
+            continue
+        if d.text:
+            text_bits.append(d.text)
+        if d.signature:
+            signature = d.signature
+            # The signature is the block's END marker: this run is complete,
+            # so the next thinking text opens a new part. Without the flush
+            # two signed blocks fused and the first block's text went
+            # upstream unsigned on replay.
+            _flush()
+    _flush()
+    return parts
+
+
 class StreamTape:
     """Bounded ring-buffer of emitted deltas.
 
@@ -115,47 +168,10 @@ class StreamTape:
 
         Continuation requests replay the partial assistant turn upstream, so
         the thinking blocks must survive with the fidelity the wire carried
-        (AUDIT #118): consecutive thinking deltas are folded into one block
-        whose ``signature`` is the last signature seen in the run (Anthropic
-        sends ``signature_delta`` at block end), and ``redacted_thinking``
-        deltas re-emerge as their own opaque block. A bare-text part drops
-        both, and the resumed request is rejected upstream — a signed
-        thinking block without its signature 400s, and a redacted block is
-        mandatory before tool use on some turns.
+        (AUDIT #118). The fold itself is ``fold_thinking_parts`` — the same
+        function the force-stream turn uses, so the two cannot drift.
         """
-        from wiwi.ir import types as ir
-
-        parts: list[ir.ThinkingPart] = []
-        text_bits: list[str] = []
-        signature: str | None = None
-
-        def _flush() -> None:
-            nonlocal text_bits, signature
-            joined = "".join(text_bits)
-            if joined:
-                parts.append(ir.ThinkingPart(joined, signature=signature))
-            text_bits = []
-            signature = None
-
-        for e in self._entries:
-            d = e.delta
-            if not isinstance(d, dl.ThinkingDelta):
-                # A content delta ends the thinking run: the next thinking
-                # delta opens a NEW block whose signature must not be glued
-                # onto the previous run's text.
-                _flush()
-                continue
-            if d.block_type == "redacted_thinking":
-                _flush()
-                parts.append(ir.ThinkingPart("", block_type="redacted_thinking",
-                                             data=d.data))
-                continue
-            if d.text:
-                text_bits.append(d.text)
-            if d.signature:
-                signature = d.signature
-        _flush()
-        return parts
+        return fold_thinking_parts(e.delta for e in self._entries)
 
     def replay_tool_calls(self) -> list:
         """Reconstruct partial ToolUseParts from taped tool-call deltas.

@@ -178,6 +178,13 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                         parts.append(ir.AudioPart(
                             b64=data,
                             mime=f"audio/{fmt if isinstance(fmt, str) and fmt else 'wav'}"))
+                elif c.get("type") == "refusal":
+                    # A content-filter refusal item: the text the model
+                    # actually returned. Dropping it emptied the turn on
+                    # replay (round 213).
+                    rtxt = c.get("refusal")
+                    if isinstance(rtxt, str) and rtxt:
+                        parts.append(ir.TextPart(rtxt))
                 elif c.get("type") == "file":
                     # The Chat surface's own outbound document form (the
                     # OpenAI adapter emits ``{"type": "file", "file": {...}}``
@@ -208,6 +215,15 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                             mime=header[5:].split(";")[0] or "application/pdf"))
                     else:
                         parts.append(ir.DocumentPart(url=fraw))
+        if role == "assistant":
+            # ``message.refusal`` is the message-level spelling of the same
+            # content-filter text (arrives with ``content: null``). It is
+            # model history: without it the replayed turn reached the
+            # upstream empty. Assistant-only — a ``refusal`` key on a user
+            # message is not history the model produced.
+            mref = m.get("refusal")
+            if isinstance(mref, str) and mref:
+                parts.append(ir.TextPart(mref))
         # Reasoning models (o1/o3, DeepSeek-R1, etc.) emit a separate
         # reasoning_content field on assistant messages. Lift it into a
         # ThinkingPart so the IR carries the thinking context forward —
@@ -380,7 +396,7 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             # same empty-object default the missing-schema case already gets.
             parameters_json_schema=(raw_params if isinstance(raw_params, dict)
                                     else {"type": "object"}),
-            strict=fn.get("strict"),
+            strict=tr.wire_bool_opt(fn.get("strict")),
             # Chat Completions has no tool search, but a caller may still send
             # the flag (a shared tool catalog across surfaces). Decode it so a
             # later re-encode to a surface that DOES host tool search keeps it.
@@ -476,21 +492,26 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             json_schema=((raw_inner if isinstance(raw_inner, dict)
                           else {"type": "object"}) if is_js else None),
             name=(raw_inner_name if isinstance(raw_inner_name, str) else None),
-            strict=js.get("strict"))
+            strict=tr.wire_bool_opt(js.get("strict")))
     stream_opts = body.get("stream_options")
     if not isinstance(stream_opts, dict):
         stream_opts = {}
     return ir.Request(
         model=body["model"], messages=messages, tools=tools, tool_choice=tool_choice,
-        gen_params=g, stream=bool(body.get("stream")),
-        stream_options_include_usage=bool(stream_opts.get("include_usage", False)),
+        gen_params=g, stream=tr.wire_bool(body.get("stream")),
+        stream_options_include_usage=tr.wire_bool(stream_opts.get("include_usage")),
         extras=tr.carry_extras(body, _KNOWN_KEYS),
     )
 
 
-_KNOWN_KEYS = {"model", "messages", "tools", "tool_choice", "temperature", "top_p",
-               "top_k", "max_tokens", "max_completion_tokens", "stop", "seed", "n",
-               "stream", "stream_options", "response_format", "parallel_tool_calls",
+# ``functions``/``function_call`` are the legacy spellings of
+# ``tools``/``tool_choice`` and are decoded into them above — keeping them
+# out of extras stops the openai adapter forwarding a second, conflicting
+# tool declaration upstream (round 213).
+_KNOWN_KEYS = {"model", "messages", "tools", "functions", "function_call",
+               "tool_choice", "temperature", "top_p", "top_k", "max_tokens",
+               "max_completion_tokens", "stop", "seed", "n", "stream",
+               "stream_options", "response_format", "parallel_tool_calls",
                "reasoning_effort"}
 
 
@@ -525,7 +546,8 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
     # OpenAI client's uncached = prompt - cached go negative and its total
     # wrong by exactly the cached amount — the exact convention fact the IR
     # field exists to carry (ir/types.py Usage.cached_in_prompt).
-    prompt_incl = u.prompt_tokens + (0 if u.cached_in_prompt else u.cached_tokens)
+    prompt_incl = tr.inclusive_prompt(u.prompt_tokens, u.cached_tokens,
+                                      u.cached_in_prompt)
     usage = {
         "prompt_tokens": prompt_incl, "completion_tokens": u.completion_tokens,
         "total_tokens": prompt_incl + u.completion_tokens,
@@ -835,7 +857,8 @@ class ChatStreamEncoder:
             # (cached_in_prompt=False) — emitting that verbatim made an
             # OpenAI client's uncached = prompt - cached go negative and its
             # total wrong by exactly the cached amount.
-            prompt_incl = u.prompt + (0 if u.cached_in_prompt else u.cached)
+            prompt_incl = tr.inclusive_prompt(u.prompt, u.cached,
+                                              u.cached_in_prompt)
             out += sse_frame("", orjson.dumps({
                 **self._chunk,
                 "usage": {

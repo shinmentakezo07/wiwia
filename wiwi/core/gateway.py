@@ -41,7 +41,11 @@ from wiwi.router.router import (
 from wiwi.streaming import deltas as dl
 from wiwi.streaming.coalesce import DeltaCoalescer
 from wiwi.streaming.loopdetect import LoopDetector
-from wiwi.streaming.resume import StreamTape, build_continuation_messages
+from wiwi.streaming.resume import (
+    StreamTape,
+    build_continuation_messages,
+    fold_thinking_parts,
+)
 from wiwi.streaming.sse import LineSSEParser, SSEEvent, iter_sse_lines
 from wiwi.streaming.validation import MAX_TOOL_ARGS_BYTES, validate_tool_args
 
@@ -236,32 +240,6 @@ def _log_attempt(router: Router, ctx: RequestContext, dep: Deployment,
         f"in {latency_ms}ms",
         ctx.request_id,
     )
-
-
-def _merge_logprobs(acc: dict[str, Any] | None,
-                    new: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Accumulate per-token logprobs across successive ``LogprobsDelta`` frames.
-
-    A non-streaming response carries the whole turn's tokens in one
-    ``logprobs.content`` list, while the stream delivers one frame per token —
-    so a reassembling arm must concatenate the list-valued members
-    (``content``, ``refusal``) rather than keep the last frame, which would
-    hand the caller logprobs for the final token only. Scalar members keep the
-    first value seen. ``None`` in, ``None`` out, so a provider that sends no
-    logprobs never grows a phantom field (see ``AssistantTurn.logprobs``).
-    """
-    if not new:
-        return acc
-    if not acc:
-        return new
-    out = dict(acc)
-    for key, val in new.items():
-        cur = out.get(key)
-        if isinstance(cur, list) and isinstance(val, list):
-            out[key] = cur + val
-        elif cur is None:
-            out[key] = val
-    return out
 
 
 def _retry_failure_error(status: int, body: str, headers: Any,
@@ -1029,7 +1007,7 @@ class Gateway:
             else:
                 raise err
         text_parts: list[str] = []
-        thinking_parts: list[str] = []
+        think_stream: list[dl.IRStreamDelta | None] = []  # None = block boundary
         tool_calls: list[ir.ToolUsePart] = []
         open_calls: dict[int, ir.ToolUsePart] = {}
         # Accumulate arg fragments in a list and join once at Close:
@@ -1122,11 +1100,12 @@ class Gateway:
                         ctx._stream_start_usage = d  # type: ignore[attr-defined]
                     elif isinstance(d, dl.TextDelta):
                         text_parts.append(d.text)
+                        think_stream.append(None)
                         content = True
                         if loop_detector.feed(d.text):
                             loop_tripped = True
                     elif isinstance(d, dl.ThinkingDelta):
-                        thinking_parts.append(d.text)
+                        think_stream.append(d)
                         content = True
                         # Reasoning text is fed too: a model can run away inside
                         # its thinking trace (AUDIT #280).
@@ -1138,6 +1117,7 @@ class Gateway:
                             builtin=d.builtin,
                             block_type=d.block_type)
                         arg_bufs[d.index] = []
+                        think_stream.append(None)
                         content = True
                     elif isinstance(d, dl.ToolCallArgsDelta):
                         if d.index in arg_bufs:
@@ -1166,11 +1146,12 @@ class Gateway:
                         if isinstance(d.block, dict):
                             server_blocks.append(d.block)
                         content = True
+                        think_stream.append(None)
                     elif isinstance(d, dl.LogprobsDelta):
                         # Per-token logprobs: concatenated, because a
                         # non-streaming response reports the whole turn in one
                         # ``content`` list (AUDIT #534).
-                        logprobs = _merge_logprobs(logprobs, d.logprobs)
+                        logprobs = dl.merge_logprobs(logprobs, d.logprobs)
                     elif isinstance(d, dl.UsageFinal):
                         usage = ir.Usage(
                             prompt_tokens=d.prompt,
@@ -1326,9 +1307,11 @@ class Gateway:
                                 stop_reason=stop_reason, usage=usage,
                                 stop_sequence=stop_sequence,
                                 server_blocks=server_blocks, logprobs=logprobs)
-        thinking = "".join(thinking_parts)
-        if thinking:
-            turn.thinking.append(ir.ThinkingPart(text=thinking))
+        # Same fold as the resume tape (``fold_thinking_parts``): a signature
+        # ends a block and a redacted blob stays opaque. The old flat join
+        # fused every thinking block into one unsigned part, so a replayed
+        # multi-block trace lost its per-block signatures upstream.
+        turn.thinking.extend(fold_thinking_parts(think_stream))
         # Cline and WorkBuddy pop `stream_options`, so the upstream never sends
         # usage on the path their non-streaming callers take: a zero prompt is
         # the NORMAL case, not an anomaly. Pricing those zeros billed $0.00 and

@@ -168,7 +168,7 @@ def _decode_tool(t: dict[str, Any]) -> ir.Tool:
             # shape. Same empty-object default as the missing case.
             parameters_json_schema=(raw_params if isinstance(raw_params, dict)
                                     else {"type": "object"}),
-            strict=t.get("strict"),
+            strict=tr.wire_bool_opt(t.get("strict")),
             # Responses defers a function by the same field name the
             # Anthropic surface uses, so it round-trips unchanged.
             defer_loading=t.get("defer_loading"))
@@ -259,7 +259,7 @@ def _decode_response_format(text_field: Any) -> ir.ResponseFormat | None:
             json_schema=(raw_schema if isinstance(raw_schema, dict)
                          else {"type": "object"}),
             name=(raw_name if isinstance(raw_name, str) else None),
-            strict=fmt.get("strict"))
+            strict=tr.wire_bool_opt(fmt.get("strict")))
     if fmt.get("type") == "json_object":
         return ir.ResponseFormat(type="json_object")
     return None
@@ -554,7 +554,7 @@ def decode_request(body: dict[str, Any],
         extras["reasoning_summary"] = r_summary
     return ir.Request(model=model, messages=messages, tools=tools,
                       tool_choice=tool_choice, gen_params=g,
-                      stream=bool(body.get("stream")),
+                      stream=tr.wire_bool(body.get("stream")),
                       # Unmapped Responses params (prompt_cache_key,
                       # safety_identifier, store, metadata, truncation, ...):
                       # openai_adapter forwards these upstream, so keep them
@@ -744,7 +744,12 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
         output.append(_reasoning_item(t.text, req_id, out_id,
                                        encrypted_content=t.encrypted_content))
         out_id += 1
-    if turn.text or not turn.tool_calls:
+    if turn.text or not (turn.thinking or turn.tool_calls):
+        # A message rides along when there is text, or when the turn is
+        # EMPTY — the client needs some output to read. A reasoning-only or
+        # tool-only turn carries its real items; an empty-string message
+        # after them is noise the stream arm never emits, and on replay it
+        # round-tripped into a placeholder text block (round 213).
         output.append(_message_item(turn.text, req_id))
         out_id += 1
     for t in turn.tool_calls:
@@ -765,7 +770,8 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
     # tokens; an Anthropic-shaped upstream reports input_tokens EXCLUSIVE of
     # cache reads (cached_in_prompt=False). Re-emit in this surface's own
     # convention so an OpenAI client's totals are self-consistent.
-    prompt_incl = u.prompt_tokens + (0 if u.cached_in_prompt else u.cached_tokens)
+    prompt_incl = tr.inclusive_prompt(u.prompt_tokens, u.cached_tokens,
+                                      u.cached_in_prompt)
     resp = _response_obj(
         model, req_id, turn.stop_reason, output,
         _usage_obj(prompt_incl, u.completion_tokens, u.cached_tokens,
@@ -1189,11 +1195,13 @@ class ResponsesStreamEncoder:
         if isinstance(d, dl.LogprobsDelta):
             # Per-token logprobs (streaming half of AUDIT #326). The sync
             # path lifts them onto the response object; this surface has no
-            # per-token event either, so the same treatment: stash for the
-            # terminal response.completed payload. Emitting nothing mid-stream
-            # keeps the event sequence legal (no phantom item types).
+            # per-token event either, so the same treatment: accumulate for
+            # the terminal response.completed payload. Frames MERGE — one
+            # arrives per token, so keeping only the last handed the caller
+            # logprobs for the final token alone. Emitting nothing
+            # mid-stream keeps the event sequence legal (no phantom items).
             if d.logprobs:
-                self._logprobs = d.logprobs
+                self._logprobs = dl.merge_logprobs(self._logprobs, d.logprobs)
             return None
         if isinstance(d, dl.ToolCallOpen):
             out: list[bytes] = []
@@ -1310,7 +1318,7 @@ class ResponsesStreamEncoder:
         # Usage convention re-base (the sync twin's rule): OpenAI totals the
         # prompt INCLUDING cached tokens; an Anthropic-shaped upstream reports
         # input_tokens EXCLUSIVE of cache reads.
-        prompt_incl = u.prompt + (0 if u.cached_in_prompt else u.cached)
+        prompt_incl = tr.inclusive_prompt(u.prompt, u.cached, u.cached_in_prompt)
         resp = _response_obj(self.model, self.req_id, self._stop, self._output,
                              _usage_obj(prompt_incl, u.output, u.cached, u.reasoning))
         # The matched stop sequence (AUDIT #497): the terminal object is where

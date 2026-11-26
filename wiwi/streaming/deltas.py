@@ -134,6 +134,35 @@ class LogprobsDelta:
     logprobs: dict[str, Any] | None = None
 
 
+
+def merge_logprobs(acc: dict[str, Any] | None,
+                   new: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Accumulate per-token logprobs across successive ``LogprobsDelta`` frames.
+
+    A non-streaming response carries the whole turn's tokens in one
+    ``logprobs.content`` list, while the stream delivers one frame per token —
+    so a reassembling arm must concatenate the list-valued members
+    (``content``, ``refusal``) rather than keep the last frame, which would
+    hand the caller logprobs for the final token only. Scalar members keep
+    the first value seen. ``None`` in, ``None`` out, so a provider that sends
+    no logprobs never grows a phantom field (see ``AssistantTurn.logprobs``).
+    Shared by the force-stream turn and the Responses stream encoder, so the
+    two reassembly paths cannot drift.
+    """
+    if not new:
+        return acc
+    if not acc:
+        return new
+    out = dict(acc)
+    for key, val in new.items():
+        cur = out.get(key)
+        if isinstance(cur, list) and isinstance(val, list):
+            out[key] = cur + val
+        elif cur is None:
+            out[key] = val
+    return out
+
+
 @dataclass(frozen=True)
 class UsageFinal:
     prompt: int = 0

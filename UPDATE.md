@@ -1103,3 +1103,51 @@ model's words.
 Open per call (no phantom call is introduced by deferring), later args fragments
 still route to their own index, a plain text stream is still emitted inline
 chunk-for-chunk, and text after a call has fully closed is inline again.
+
+---
+
+## Round 213 — the wire/IR audit: eleven decode and fold defects (2026-11-26)
+
+**Translation-relevant changes in all four inbound codecs, the resume tape, the
+force-stream turn, and `wiwi/ir/translation.py`.** Full register: AUDIT
+#604–#614. Tests: `tests/test_fix_round213.py` (57).
+
+**Thinking-block boundaries (AUDIT #605–#607).** A signature is the END of an
+Anthropic thinking block, everywhere a fold or encoder reconstructs one. The
+wire encoder (`anthropic_messages.py`) keys on a signed-open flag: further
+thinking text opens a new block, the deferred flush splits a run at each
+signature, a signature-only delta behind an open tool block defers with the
+run (never into `_pending_sig`), and a redacted blob behind a tool group
+defers in arrival order instead of closing the tool block mid-arguments.
+The resume tape and `Gateway._complete_via_stream` no longer fold thinking
+themselves: both call `wiwi/streaming/resume.py:fold_thinking_parts`
+(signature ends the run, redacted is opaque, other content deltas are
+boundaries). Two rules for the same wire shape can no longer drift apart.
+
+**Replay fidelity (AUDIT #604, #608, #609, #612).** An Anthropic `document`
+with a Files-API `file_id` now decodes to `DocumentPart` (the base64/url arms
+already did; an id-less source is dropped rather than re-rendered bogus).
+`message.refusal` and `{"type": "refusal"}` content items on an assistant turn
+decode to `TextPart` — assistant role only — so a client echoing a
+content-filter turn no longer hands the model an empty message. Responses
+streamed logprobs MERGE across frames (`deltas.merge_logprobs`, the function
+the force-stream arm already used) instead of keeping the last token's; the
+stored payload inherits the fix through `rebuild_stored_payload`. A
+reasoning-only sync turn no longer appends an empty `message` item — the
+message rides along only when there is text or the turn is empty.
+
+**Boundary typing (AUDIT #610, #611, #613, #614).** New normalizers in
+`wiwi/ir/translation.py`: `wire_bool` (stream / `include_usage`: only `true`
+and `1` stream, on all four surfaces), `wire_bool_opt` (`strict` on tools and
+response formats: `None` when absent or malformed, `0`/`1`/booleans pass),
+and `inclusive_prompt`/`exclusive_prompt` (usage re-base; `cached_in_prompt =
+None` now emits verbatim instead of inventing a convention — the add-direction
+sites used to treat `None` as `False` and bill cache reads into the prompt).
+Legacy `functions`/`function_call` are decoded, not forwarded through extras,
+so an OpenAI upstream no longer sees a second conflicting tool declaration.
+
+**Invariants preserved, pinned by the round-213 controls:** the two recorded
+usage conventions keep their re-base, `stream: true` still streams on every
+surface, well-formed `strict` survives to the upstream, the empty-turn message
+shape is unchanged, and the force-stream fold's tool-call and stop-reason
+carriers are byte-identical to before.
