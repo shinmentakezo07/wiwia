@@ -38,8 +38,17 @@ jobs:
       - name: Audit register
         run: python3 scripts/audit_lint.py
 
-      - name: Pytest
-        run: python3 -m pytest tests/ -q
+      - name: Dependency hygiene (deptry)
+        run: deptry wiwi
+
+      - name: Vulnerability audit (pip-audit)
+        run: pip-audit --skip-editable
+
+      - name: Pytest (parallel, random order)
+        run: python3 -m pytest tests/ -q -n auto --benchmark-disable
+
+      - name: Hot-path benchmarks
+        run: python3 -m pytest tests/bench --benchmark-only -p no:randomly -q
 
   web:
     name: web (lint, test, typecheck, build)

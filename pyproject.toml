@@ -35,10 +35,19 @@ dev = [
   "asgi-lifespan>=2.1",
   "ruff>=0.4",
   "hypothesis>=6.100",
+  # Parallel test runs (`pytest -n auto`).
+  "pytest-xdist>=3.5",
+  # Random test order to surface leaked cache/singleton state between tests.
+  "pytest-randomly>=3.15",
+  # Hot-path micro-benchmarks (tests/bench/, run with --benchmark-only).
+  "pytest-benchmark>=4.0",
+  # Dependency hygiene: known CVEs and declared-vs-imported drift.
+  "pip-audit>=2.7",
+  "deptry>=0.20",
 ]
 redis = ["redis>=5.0"]
 otel = [
-  "opentelemetry-api>=1.20",
+  "opentelemetry-api>=1.45.2",
   "opentelemetry-sdk>=1.20",
   "opentelemetry-exporter-otlp-proto-http>=1.20",
 ]
@@ -56,6 +65,23 @@ packages = ["wiwi"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+
+[tool.deptry]
+known_first_party = ["wiwi"]
+# Dev/test tooling is never imported by wiwi/ itself.
+pep621_dev_dependency_groups = ["dev"]
+
+[tool.deptry.per_rule_ignores]
+# aiosqlite/asyncpg are loaded by SQLAlchemy from the DATABASE_URL dialect,
+# and the otel sdk/exporter are imported lazily, so no static import exists.
+DEP002 = [
+  "aiosqlite",
+  "asyncpg",
+  "opentelemetry-sdk",
+  "opentelemetry-exporter-otlp-proto-http",
+]
+# starlette ships with FastAPI and its version is pinned by FastAPI's range.
+DEP003 = ["starlette"]
 
 [tool.ruff]
 line-length = 100

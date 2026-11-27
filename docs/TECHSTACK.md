@@ -53,6 +53,9 @@ Runtime dependencies: 12. That count is a feature.
 | Property-based | hypothesis >= 6.100 |
 | Python lint | ruff only (line 100, py311, no black/isort) |
 | Frontend checks | `tsc -b` (in build) + `npm run lint` (ESLint) + `npm test` (vitest) |
+| Parallel / order | pytest-xdist (`-n auto`, ~2× faster) + pytest-randomly (random order, catches leaked state) |
+| Micro-benchmarks | pytest-benchmark — `tests/bench/`, run with `--benchmark-only -p no:randomly` |
+| Dependency hygiene | deptry (declared vs imported, config in `[tool.deptry]`) + pip-audit (CVEs), both in CI |
 | Coverage | none (no pytest-cov, not enforced) |
 
 ---
