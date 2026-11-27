@@ -12,9 +12,13 @@ import {
   ChevronDown,
   Copy,
   KeyRound,
+  GitBranch,
+  HeartPulse,
+  Layers,
   Minus,
   Server,
   Terminal,
+  Timer,
 } from "lucide-react";
 import { Card } from "@/components/ui";
 import { GraphSection, OpenAIIcon, AnthropicIcon, GeminiIcon, OpenRouterIcon, MoonshotIcon } from "@/components/AnimatedBeam";
@@ -731,18 +735,40 @@ export function LandingPage() {
               backs off, tries another key or deployment, and records every attempt.
             </p>
           </div>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {[
-              { title: "Key pools", body: "Several keys per provider, spread by smooth weighted round-robin." },
-              { title: "Cooldowns", body: "A failing key is cooled down and skipped instead of retried forever." },
-              { title: "Fallbacks", body: "Deployment and model-group chains pick the next healthy route." },
-              { title: "Health healer", body: "An opt-in probe restores cooling keys early, on probation at first." },
-            ].map((item) => (
-              <div key={item.title} className="rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-5">
-                <h3 className="text-[15px] font-semibold text-[var(--admin-text)]">{item.title}</h3>
-                <p className="mt-2 text-[13px] leading-relaxed text-[var(--admin-text-muted)]">{item.body}</p>
-              </div>
-            ))}
+          <div className="relative">
+            <div
+              aria-hidden
+              className="pointer-events-none absolute left-[38px] right-[calc((100%-48px)/4-38px)] top-[39px] hidden h-px bg-gradient-to-r from-emerald-500/0 via-emerald-500/40 to-emerald-500/0 lg:block"
+            />
+            <ol className="relative grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              {[
+                { icon: Layers, step: "01", title: "Key pools", tag: "spread", body: "Several keys per provider, spread by smooth weighted round-robin." },
+                { icon: Timer, step: "02", title: "Cooldowns", tag: "skip", body: "A failing key is cooled down and skipped instead of retried forever." },
+                { icon: GitBranch, step: "03", title: "Fallbacks", tag: "reroute", body: "Deployment and model-group chains pick the next healthy route." },
+                { icon: HeartPulse, step: "04", title: "Health healer", tag: "restore", body: "An opt-in probe restores cooling keys early, on probation at first." },
+              ].map(({ icon: Icon, step, title, tag, body }) => (
+                <li
+                  key={title}
+                  className="group relative overflow-hidden rounded-2xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-5 transition-all duration-300 hover:-translate-y-1 hover:border-emerald-500/40 hover:shadow-[0_12px_40px_-12px_rgba(16,185,129,0.35)] focus-within:border-emerald-500/40"
+                >
+                  <div
+                    aria-hidden
+                    className="pointer-events-none absolute inset-0 bg-gradient-to-br from-emerald-500/0 to-teal-500/0 opacity-0 transition-opacity duration-300 group-hover:from-emerald-500/10 group-hover:to-teal-500/5 group-hover:opacity-100"
+                  />
+                  <div className="relative mb-4 flex items-center justify-between">
+                    <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-emerald-500/30 bg-[var(--admin-surface)] text-emerald-400 ring-4 ring-[var(--admin-bg,transparent)] transition-transform duration-300 group-hover:scale-110">
+                      <Icon size={17} aria-hidden />
+                    </span>
+                    <span className="font-mono text-[11px] tracking-wider text-[var(--admin-text-dim)]">{step}</span>
+                  </div>
+                  <h3 className="relative text-[15px] font-semibold text-[var(--admin-text)]">{title}</h3>
+                  <p className="relative mt-2 text-[13px] leading-relaxed text-[var(--admin-text-muted)]">{body}</p>
+                  <span className="relative mt-4 inline-flex rounded-full border border-emerald-500/20 bg-emerald-500/5 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-emerald-400/90">
+                    {tag}
+                  </span>
+                </li>
+              ))}
+            </ol>
           </div>
           <div className="mt-8 text-center">
             <Link to="/reliability" className="inline-flex items-center gap-1.5 text-sm font-medium text-[var(--admin-text-muted)] transition-colors hover:text-[var(--admin-text)]">
