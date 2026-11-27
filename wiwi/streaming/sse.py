@@ -151,8 +151,14 @@ class LineSSEParser:
         if self._pending is not None:
             pending, self._pending = self._pending, None
             # The queued event is the result of THIS call, but the line that
-            # triggered it still needs parsing into the next frame's buffer.
-            self.feed_line(line)
+            # triggered it still needs parsing. Its own result (e.g. a second
+            # back-to-back bare JSON line) must be queued, not discarded.
+            # Invariant: _pending is only set right after flush() drained
+            # _data, so the inner call sees an empty buffer and can never both
+            # return an event and queue another one.
+            nxt = self.feed_line(line)
+            if nxt is not None:
+                self._pending = nxt
             return pending
         line = line.removeprefix("\ufeff")
         if line == "":
