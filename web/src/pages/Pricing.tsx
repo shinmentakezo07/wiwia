@@ -14,7 +14,6 @@ import {
   Network,
   Server,
   ShieldCheck,
-  Sparkles,
   Terminal,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -323,90 +322,93 @@ export function PricingPage() {
           </p>
         </div>
 
-        <div className="grid items-stretch gap-6 pt-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
-          {PLANS.map((plan) => {
+        {/* Void-black plans. Self-hosted gets the slow conic border; both panes
+            carry a pointer-tracked spotlight (fine pointers only, CSS-gated). */}
+        <div className="grid items-stretch gap-5 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
+          {PLANS.map((plan, i) => {
             const Icon = plan.icon;
+            const primary = plan.featured;
             return (
-              <div key={plan.name} className="relative">
-                {plan.featured && (
-                  <div
-                    aria-hidden
-                    className="pointer-events-none absolute -inset-px rounded-[17px] bg-gradient-to-b from-blue-400/50 via-blue-500/10 to-transparent opacity-80 blur-[1px]"
-                  />
-                )}
-                <div
-                  className={cn(
-                    "relative flex h-full flex-col rounded-2xl border p-6 transition-colors sm:p-8",
-                    plan.featured
-                      ? "border-blue-400/40 bg-gradient-to-b from-blue-500/[0.12] via-[#0a0a0a] to-[#0a0a0a]"
-                      : "border-white/[0.08] bg-[#0a0a0a] hover:border-violet-400/30",
-                  )}
+              <div
+                key={plan.name}
+                className={cn("wiwi-plan-in rounded-2xl", primary ? "wiwi-conic-border" : "border border-white/[0.07]")}
+                style={{ animationDelay: `${i * 90}ms` }}
+              >
+                <article
+                  aria-labelledby={`plan-${i}`}
+                  onPointerMove={(e) => {
+                    const r = e.currentTarget.getBoundingClientRect();
+                    e.currentTarget.style.setProperty("--mx", `${e.clientX - r.left}px`);
+                    e.currentTarget.style.setProperty("--my", `${e.clientY - r.top}px`);
+                  }}
+                  className="wiwi-plan group relative flex h-full flex-col overflow-hidden rounded-[15px] bg-black p-6 sm:p-8 lg:p-10"
                 >
-                  {plan.featured && (
-                    <span className="absolute -top-3 left-6 inline-flex sm:left-8 items-center gap-1.5 rounded-full border border-blue-300/30 bg-blue-500 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-white shadow-[0_6px_20px_-6px_rgba(59,130,246,0.8)]">
-                      <Sparkles size={11} aria-hidden />
-                      Most popular
-                    </span>
-                  )}
+                  <div aria-hidden className="wiwi-plan-grid pointer-events-none absolute inset-0" />
+                  {primary && <div aria-hidden className="wiwi-plan-scan pointer-events-none absolute inset-x-0 top-0 h-px" />}
 
-                  <div className="flex items-start justify-between gap-3">
-                    <div
+                  <header className="relative flex items-center justify-between gap-3">
+                    <span className="flex items-center gap-3">
+                      <Icon size={18} className={primary ? "text-blue-300" : "text-violet-300"} aria-hidden />
+                      <h3 id={`plan-${i}`} className="text-[15px] font-semibold text-[var(--admin-text)]">
+                        {plan.name}
+                      </h3>
+                    </span>
+                    <span className="font-mono text-[10px] uppercase tracking-[0.13em] text-[var(--admin-text-dim)]">
+                      .{String(i + 1).padStart(2, "0")} · {plan.tag}
+                    </span>
+                  </header>
+
+                  <p className="relative mt-10 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                    <span
                       className={cn(
-                        "flex size-12 items-center justify-center rounded-xl border",
-                        plan.featured ? "border-blue-400/30 bg-blue-500/15" : "border-violet-400/25 bg-violet-500/10",
+                        "font-mono text-[clamp(2.75rem,6vw,4.25rem)] font-semibold leading-none tracking-[-0.06em]",
+                        primary
+                          ? "bg-gradient-to-b from-white to-white/40 bg-clip-text text-transparent"
+                          : "text-[var(--admin-text)]",
                       )}
                     >
-                      <Icon size={21} className={plan.featured ? "text-blue-300" : "text-violet-300"} aria-hidden />
-                    </div>
-                    <Badge tone={plan.featured ? "blue" : "violet"}>{plan.tag}</Badge>
-                  </div>
-
-                  <h3 className="mt-6 text-[12px] font-medium uppercase tracking-[0.16em] text-[var(--admin-text-muted)]">
-                    {plan.name}
-                  </h3>
-                  <div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                    <span className="font-mono text-[clamp(3rem,7vw,4.25rem)] font-semibold leading-none tracking-[-0.06em] text-[var(--admin-text)]">
                       {plan.price}
                     </span>
                     <span className="text-[13px] text-[var(--admin-text-dim)]">{plan.priceNote}</span>
-                  </div>
-                  <p className="mt-4 max-w-[46ch] text-[13.5px] leading-relaxed text-[var(--admin-text-muted)]">
+                  </p>
+                  <p className="relative mt-4 max-w-[46ch] text-[13.5px] leading-relaxed text-[var(--admin-text-muted)]">
                     {plan.summary}
                   </p>
 
-                  <div aria-hidden className="my-6 h-px bg-gradient-to-r from-white/[0.14] via-white/[0.05] to-transparent" />
-
-                  <ul className="space-y-3">
-                    {plan.features.map((feature) => (
-                      <li key={feature} className="flex items-start gap-3 text-[13px] leading-snug text-[var(--admin-text-muted)]">
-                        <span
-                          className={cn(
-                            "mt-px flex size-5 shrink-0 items-center justify-center rounded-full border",
-                            plan.featured ? "border-emerald-400/25 bg-emerald-400/10" : "border-violet-400/25 bg-violet-400/10",
-                          )}
-                        >
-                          <Check size={11} className={plan.featured ? "text-emerald-400" : "text-violet-300"} aria-hidden />
-                        </span>
+                  <p className="relative mt-8 flex items-center gap-3 font-mono text-[10px] uppercase tracking-[0.13em] text-[var(--admin-text-dim)]">
+                    <span>{primary ? "Included" : "Everything in Self-hosted, plus"}</span>
+                    <span aria-hidden className="h-px flex-1 bg-gradient-to-r from-white/[0.1] to-transparent" />
+                  </p>
+                  <ul className="relative mt-4 space-y-3">
+                    {plan.features.map((feature, j) => (
+                      <li
+                        key={feature}
+                        className="wiwi-plan-in flex items-start gap-3 text-[13px] leading-snug text-[var(--admin-text-muted)]"
+                        style={{ animationDelay: `${180 + i * 90 + j * 45}ms` }}
+                      >
+                        <Check
+                          size={14}
+                          className={cn("mt-0.5 shrink-0", primary ? "text-emerald-400" : "text-violet-300")}
+                          aria-hidden
+                        />
                         <span>{feature}</span>
                       </li>
                     ))}
                   </ul>
 
-                  <div className="mt-auto pt-8">
+                  <div className="relative mt-auto pt-10">
                     <Link
                       to={plan.cta.to}
                       className={cn(
-                        "group/cta flex min-h-12 w-full items-center justify-center gap-2 rounded-[10px] px-4 text-[14px] font-medium transition-[filter,background-color,border-color] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--admin-bg)]",
-                        plan.featured
-                          ? "bg-gradient-to-b from-blue-500 to-blue-600 text-white shadow-[0_8px_24px_-10px_rgba(59,130,246,0.6)] hover:brightness-110"
-                          : "border border-[var(--admin-border-hover)] bg-white/[0.02] text-[var(--admin-text)] hover:bg-white/[0.05]",
+                        "admin-btn group/cta min-h-12 w-full gap-2",
+                        primary ? "admin-btn-primary wiwi-shimmer" : "admin-btn-ghost",
                       )}
                     >
                       {plan.cta.label}
                       <ArrowRight size={15} className="transition-transform motion-safe:group-hover/cta:translate-x-0.5" aria-hidden />
                     </Link>
                   </div>
-                </div>
+                </article>
               </div>
             );
           })}
