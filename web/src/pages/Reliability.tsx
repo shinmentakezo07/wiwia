@@ -246,7 +246,7 @@ function SectionHead(props: { id: string; index: string; label: string; title: s
       </p>
       <h2
         id={props.id}
-        className="mt-2 text-[clamp(1.35rem,3vw,1.65rem)] font-semibold tracking-[-0.02em] text-[var(--admin-text)]"
+        className="mt-2 max-w-[24ch] text-[clamp(1.6rem,3.6vw,2.15rem)] font-semibold leading-[1.1] tracking-[-0.03em] text-[var(--admin-text)]"
       >
         {props.title}
       </h2>
@@ -263,7 +263,17 @@ function AttemptTrace() {
   const scenario = SCENARIOS.find((s) => s.id === scenarioId) ?? SCENARIOS[0];
 
   return (
-    <div className="min-w-0 overflow-hidden rounded-xl border border-[var(--admin-border-hover)] bg-[var(--admin-surface)]">
+    <div className="min-w-0 overflow-hidden rounded-2xl border border-[var(--admin-border-hover)] bg-[var(--admin-surface)] shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset,0_24px_48px_-24px_rgba(0,0,0,0.6)]">
+      {/* Request line: anchors the trace to one real call, so the rows read as its history. */}
+      <div
+        className="flex items-center justify-between gap-3 border-b border-[var(--admin-border)] px-4 py-2.5 text-[11.5px] text-[var(--admin-text-dim)]"
+        style={{ fontFamily: MONO }}
+      >
+        <span className="min-w-0 truncate">
+          <span className="text-[var(--admin-text-muted)]">POST</span> /v1/chat/completions
+        </span>
+        <span className="shrink-0 tabular-nums">{scenario.attempts.length} attempts</span>
+      </div>
       <div className="flex items-center gap-1 border-b border-[var(--admin-border)] p-1.5">
         <div role="tablist" aria-label="Failure scenario" className="flex min-w-0 flex-1 gap-1 overflow-x-auto">
           {SCENARIOS.map((s) => {
@@ -314,13 +324,27 @@ function AttemptTrace() {
           <li
             key={`${attempt.target}-${i}`}
             style={{ animationDelay: `${i * 0.12}s` }}
-            className="rel-trace-row grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3 px-4 py-3.5"
+            className="rel-trace-row relative grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3 px-4 py-3.5"
           >
+            {/* Rail: joins this attempt's dot to the next, so the trace reads as one request. */}
+            {i < scenario.attempts.length - 1 && (
+              <span
+                aria-hidden
+                className="absolute bottom-[-0.875rem] left-[calc(1rem+3.5px)] top-[1.6rem] w-px bg-[var(--admin-border-hover)]"
+              />
+            )}
             <span
               aria-hidden
-              className={`mt-1.5 size-2 rounded-full ${STATUS_DOT[attempt.tone]}`}
+              className={`relative mt-1.5 size-2 rounded-full ring-4 ring-[var(--admin-surface)] ${STATUS_DOT[attempt.tone]}`}
             />
             <div className="min-w-0">
+              <p
+                className="mb-1 text-[10.5px] uppercase tracking-[0.12em] text-[var(--admin-text-dim)]"
+                style={{ fontFamily: MONO }}
+              >
+                attempt {i + 1}
+                {i === scenario.attempts.length - 1 ? " · served" : ""}
+              </p>
               <p className="break-words text-[13px] font-medium text-[var(--admin-text)]">
                 {attempt.target}
               </p>
@@ -413,8 +437,15 @@ function Sequence() {
         id="seq-panel"
         role="tabpanel"
         aria-labelledby={`seq-tab-${active}`}
-        className="flex min-w-0 flex-col rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-5"
+        className="relative flex min-w-0 flex-col overflow-hidden rounded-xl border border-[var(--admin-border)] bg-[var(--admin-surface)] p-5"
       >
+        {/* Progress through the sequence; transform-only so it never triggers layout. */}
+        <span aria-hidden className="absolute inset-x-0 top-0 h-px bg-white/[0.06]">
+          <span
+            className="block h-full origin-left bg-[var(--admin-accent)] transition-transform duration-300 motion-reduce:transition-none"
+            style={{ transform: `scaleX(${(active + 1) / FLOW.length})` }}
+          />
+        </span>
         <span
           className="w-fit rounded-md bg-white/[0.06] px-2 py-1 text-[11px] uppercase tracking-[0.08em] text-[var(--admin-text-muted)]"
           style={{ fontFamily: MONO }}
@@ -597,7 +628,7 @@ export function ReliabilityPage() {
               </p>
               <h1
                 id="rel-title"
-                className="mt-3 text-[clamp(2rem,5vw,2.9rem)] font-semibold leading-[1.05] tracking-[-0.035em] text-[var(--admin-text)]"
+                className="mt-3 text-[clamp(2.25rem,6vw,3.5rem)] font-semibold leading-[1.02] tracking-[-0.045em] text-[var(--admin-text)]"
               >
                 A provider fails.
                 <br />
@@ -620,12 +651,12 @@ export function ReliabilityPage() {
 
           <dl className="m-0 mt-10 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-[var(--admin-border)] bg-[var(--admin-border)] sm:grid-cols-4">
             {STATS.map((stat) => (
-              <div key={stat.label} className="flex flex-col-reverse bg-[var(--admin-surface)] px-4 py-3.5">
-                <dt className="mt-2 text-[11px] uppercase leading-tight tracking-[0.08em] text-[var(--admin-text-muted)]">
+              <div key={stat.label} className="flex flex-col-reverse bg-[var(--admin-surface)] px-5 py-5">
+                <dt className="mt-2.5 text-[11px] uppercase leading-tight tracking-[0.1em] text-[var(--admin-text-dim)]">
                   {stat.label}
                 </dt>
                 <dd
-                  className="m-0 text-[24px] font-semibold tabular-nums leading-none text-[var(--admin-text)]"
+                  className="m-0 text-[clamp(1.75rem,4vw,2.25rem)] font-semibold tabular-nums leading-none tracking-[-0.03em] text-[var(--admin-text)]"
                   style={{ fontFamily: MONO }}
                 >
                   {stat.value}
@@ -659,7 +690,7 @@ export function ReliabilityPage() {
             {LAYERS.map((layer, i) => {
               const Icon = layer.icon;
               return (
-                <li key={layer.title} className="min-w-0 bg-[var(--admin-surface)] p-5">
+                <li key={layer.title} className="min-w-0 bg-[var(--admin-surface)] p-6 transition-colors hover:bg-white/[0.02]">
                   <div className="flex items-center justify-between gap-2">
                     <span
                       className="text-[11px] uppercase tracking-[0.1em] text-[var(--admin-text-dim)]"
@@ -668,6 +699,17 @@ export function ReliabilityPage() {
                       {i + 1} · {layer.scope}
                     </span>
                     <Icon size={16} className="shrink-0 text-[var(--admin-text-muted)]" aria-hidden />
+                  </div>
+                  {/* Blast radius: one segment per layer, so escalation reads at a glance. */}
+                  <div aria-hidden className="mt-4 flex gap-1">
+                    {LAYERS.map((_, j) => (
+                      <span
+                        key={j}
+                        className={`h-1 flex-1 rounded-full ${
+                          j <= i ? "bg-[var(--admin-text-muted)]" : "bg-white/[0.06]"
+                        }`}
+                      />
+                    ))}
                   </div>
                   <h3 className="mt-3 text-[15px] font-semibold text-[var(--admin-text)]">
                     {layer.title}
