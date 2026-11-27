@@ -54,8 +54,7 @@ const BuiltinProvidersPage = lazyRoute(() => import("@/pages/BuiltinProviders").
 const OAuthProvidersPage = lazyRoute(() => import("@/pages/OAuthProviders").then((m) => ({ default: m.OAuthProvidersPage })));
 const OAuthProviderPage = lazyRoute(() => import("@/pages/OAuthProviders").then((m) => ({ default: m.OAuthProviderPage })));
 const OAuthAccountDetailPage = lazyRoute(() => import("@/pages/OAuthAccountDetail").then((m) => ({ default: m.OAuthAccountDetailPage })));
-const WorkBuddyAccountsPage = lazyRoute(() => import("@/pages/WorkBuddyAccounts").then((m) => ({ default: m.WorkBuddyAccountsPage })));
-const AccountLoginPage = lazyRoute(() => import("@/pages/AccountLogin").then((m) => ({ default: m.AccountLoginPage })));
+
 const HermesPage = lazyRoute(() => import("@/pages/Hermes").then((m) => ({ default: m.HermesPage })));
 const HermesOAuthPage = lazyRoute(() => import("@/pages/HermesOAuth").then((m) => ({ default: m.HermesOAuthPage })));
 const VirtualKeysPage = lazyRoute(() => import("@/pages/VirtualKeys").then((m) => ({ default: m.VirtualKeysPage })));
@@ -238,22 +237,6 @@ function AppRoutes() {
           element={
             <RequireAdmin>
               <OAuthAccountDetailPage />
-            </RequireAdmin>
-          }
-        />
-        <Route
-          path="/console/login"
-          element={
-            <RequireAdmin>
-              <AccountLoginPage />
-            </RequireAdmin>
-          }
-        />
-        <Route
-          path="/console/workbuddy"
-          element={
-            <RequireAdmin>
-              <WorkBuddyAccountsPage />
             </RequireAdmin>
           }
         />

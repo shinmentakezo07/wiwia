@@ -26,7 +26,6 @@ from wiwi.providers.nim_adapter import NimAdapter
 from wiwi.providers.openai_adapter import OpenAIAdapter
 from wiwi.providers.opencode_adapter import OpencodeAdapter
 from wiwi.providers.openrouter_adapter import OpenRouterAdapter
-from wiwi.providers.workbuddy_adapter import WorkBuddyAdapter
 
 # Provider types that fall through to the OpenAI adapter (they share the
 # Chat Completions wire format). Every other type in PROVIDER_TYPES must have
@@ -42,7 +41,6 @@ _SINGLETONS: dict[str, ProviderAdapter] = {
     "cline": ClineAdapter(),
     "openai": OpenAIAdapter(),
     "bai": BAIAdapter(),
-    "workbuddy": WorkBuddyAdapter(),
     "opencode": OpencodeAdapter(),
     "ifm": IFMAdapter(),
 }
@@ -83,8 +81,6 @@ def fresh_adapter(provider_type: str) -> ProviderAdapter:
         return NimAdapter()
     if provider_type == "cline":
         return ClineAdapter()
-    if provider_type == "workbuddy":
-        return WorkBuddyAdapter()
     if provider_type == "opencode":
         return OpencodeAdapter()
     if provider_type == "bai":
@@ -100,7 +96,7 @@ def fresh_adapter(provider_type: str) -> ProviderAdapter:
 # get_adapter — either via an explicit branch or the OpenAI wire-format
 # fallback. Catches drift at import time.
 _unhandled = set(PROVIDER_TYPES) - _OPENAI_WIRE_TYPES - {
-    "anthropic", "gemini", "openrouter", "nvidia-nim", "cline", "workbuddy",
+    "anthropic", "gemini", "openrouter", "nvidia-nim", "cline",
     "opencode", "hermes", "ifm"}
 assert not _unhandled, (
     f"provider types {_unhandled} are in PROVIDER_TYPES but have no adapter "

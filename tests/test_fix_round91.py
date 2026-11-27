@@ -77,7 +77,7 @@ class TestProbeRequestCarriesTheDeploymentModel:
     @pytest.mark.parametrize(
         "provider_type",
         ["openai", "anthropic", "openrouter", "bai", "gmicloud",
-         "nvidia-nim", "cline", "workbuddy", "opencode"],
+         "nvidia-nim", "cline", "opencode"],
     )
     def test_encode_request_uses_its_own_argument_not_the_request_field(
             self, provider_type):

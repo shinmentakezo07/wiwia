@@ -7,7 +7,7 @@
 # 🌀 wiwi
 
 **Speak** OpenAI Chat · OpenAI Responses (Codex CLI) · Anthropic Messages (Claude Code) **on the inbound.**<br/>
-**Route to** OpenAI · Anthropic · Gemini · OpenRouter · NVIDIA NIM · Cline · WorkBuddy · GMI Cloud · B.AI · OpenCode Zen · Hermes (Nous Portal) · IFM (MBZUAI) · any OpenAI-compatible endpoint.
+**Route to** OpenAI · Anthropic · Gemini · OpenRouter · NVIDIA NIM · Cline · GMI Cloud · B.AI · OpenCode Zen · Hermes (Nous Portal) · IFM (MBZUAI) · any OpenAI-compatible endpoint.
 
 <p>
   <a href="#-quickstart"><img alt="Get started" src="https://img.shields.io/badge/get%20started-%20quickstart-6366f1?style=for-the-badge"></a>
@@ -577,7 +577,6 @@ Any inbound dialect works with any outbound provider — the IR handles translat
     <td align="center"><img src="web/public/logos/openrouter.svg" width="16" alt="OpenRouter"></td>
     <td align="center"><img src="web/public/logos/nvidia-nim.svg" width="16" alt="NVIDIA NIM"></td>
     <td align="center"><img src="web/public/logos/cline.svg" width="16" alt="Cline"></td>
-    <td align="center"><img src="web/public/logos/workbuddy.svg" width="16" alt="WorkBuddy"></td>
     <td align="center"><img src="web/public/logos/gmicloud.svg" width="16" alt="GMI Cloud"></td>
     <td align="center"><img src="web/public/logos/bai.svg" width="16" alt="B.AI"></td>
     <td align="center"><img src="web/public/logos/opencode.svg" width="16" alt="OpenCode Zen"></td>
@@ -632,7 +631,6 @@ without a matching adapter.
 | `openrouter` | `https://openrouter.ai/api/v1` | unified `reasoning{}` translation, `reasoning_details` decoding |
 | `nvidia-nim` | `https://integrate.api.nvidia.com/v1` | **vLLM quirks**: strips boolean JSON-Schema subschemas, aliases params named `type`, restores agent-facing names on the way back |
 | `cline` | `https://api.cline.bot/api/v1` | OAuth (WorkOS) with on-demand refresh, cross-account WRR |
-| `workbuddy` | `https://copilot.tencent.com` | WorkBuddy / CodeBuddy (Tencent); stream-only upstream, business errors ride HTTP 200 |
 | `gmicloud` | `https://api.gmi-serving.com/v1` | GMI Cloud serving endpoint |
 | `bai` | `https://api.b.ai/v1` | one key across Chat / Responses / Messages |
 | `opencode` | `https://opencode.ai/inference/v1` | per-model protocol routing with a live `User-Agent` |
@@ -658,7 +656,7 @@ A `.env` in the cwd loads first, so real environment variables always win.
 providers:              # named provider accounts, each with a pool of keyed entries
   - name: openai-main
     provider: openai    # openai | anthropic | gemini | openai-compatible | openrouter
-                        # | gmicloud | bai | nvidia-nim | cline | workbuddy
+                        # | gmicloud | bai | nvidia-nim | cline
                         # | opencode | hermes | ifm
     keys:
       - {label: main,   key: os.environ/OPENAI_API_KEY,   weight: 3}
@@ -854,7 +852,7 @@ All `/admin/*` requires the master key (`Authorization: Bearer …`) or an admin
 | **Models & routing** | `GET /admin/models` · `PATCH /admin/model-groups/{name}` · `POST/DELETE …/deployments` · `POST /admin/aliases` · `GET/PUT/DELETE /admin/pricing/{id}` |
 | **Logs & stats** | `GET /admin/logs/{requests,proxy,audit}` · `GET /admin/logs/requests/{id}/metrics` · `GET /admin/stream` (SSE) · `GET /admin/stats/{overview,timeseries}` · `GET/PUT /admin/alert-rules` |
 | **Users & sessions** | `GET /admin/users` · `PATCH /admin/users/{uid}` · `POST /auth/{signup,login,logout}` · `GET /auth/me` |
-| **OAuth** | `/admin/cline/oauth/*` · `/cline/oauth/callback` · `/admin/workbuddy/*` · `/admin/hermes/oauth/*` |
+| **OAuth** | `/admin/cline/oauth/*` · `/cline/oauth/callback` · `/admin/hermes/oauth/*` |
 
 → Every endpoint, field, and a runnable `curl` for each → [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md).
 

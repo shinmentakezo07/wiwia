@@ -146,7 +146,7 @@ async def test_throttle_refund_returns_a_slot():
 # -- #224 ---------------------------------------------------------------------
 
 @pytest.mark.parametrize("provider_type", [
-    "openai", "openrouter", "nvidia-nim", "cline", "workbuddy", "bai",
+    "openai", "openrouter", "nvidia-nim", "cline", "bai",
 ])
 @pytest.mark.parametrize("payload", [{"choices": 5}, {"choices": True},
                                      {"choices": {"a": 1}}])
@@ -170,7 +170,6 @@ def test_truthy_non_list_choices_is_ignored(provider_type, payload):
     ("gemini", {"candidates": [None], "usageMetadata": "x"}),
     ("nvidia-nim", {"choices": [{"message": None}]}),
     ("cline", {"choices": [{"message": None}]}),
-    ("workbuddy", {"choices": [None]}),
     ("bai", {"choices": [{"message": None}]}),
 ])
 def test_sync_decode_tolerates_null_nested_fields(provider_type, body):

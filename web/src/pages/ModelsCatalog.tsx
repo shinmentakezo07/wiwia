@@ -30,7 +30,6 @@ const PROVIDER_HUES: Record<string, number> = {
   google: 217,
   openrouter: 76,
   opencode: 262,
-  workbuddy: 190,
 };
 
 function providerHue(provider: string): number {

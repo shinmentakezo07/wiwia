@@ -4,7 +4,7 @@
 //
 // Each shared model becomes a normal model group named `<prefix>:<model_id>`
 // (the same convention the Cline default-model reconciler already uses), with
-// one deployment per account of that type. Requests to `workbuddy:<id>` or
+// one deployment per account of that type. Requests to `hermes:<id>` or
 // `hermes:<id>` therefore smooth-WRR across all of those accounts. Deployments
 // belonging to other provider types are never touched.
 
@@ -27,9 +27,9 @@ import {
 } from "@/components/ui";
 
 export function SharedModelsCard(props: {
-  /** Provider type the deployments are scoped to, e.g. "workbuddy". */
+  /** Provider type the deployments are scoped to, e.g. "hermes". */
   providerType: string;
-  /** Group namespace, e.g. "workbuddy" → groups named `workbuddy:<model>`. */
+  /** Group namespace, e.g. "hermes" → groups named `hermes:<model>`. */
   prefix: string;
   /** Every provider in the gateway; the card filters by `providerType`. */
   providers: Provider[];

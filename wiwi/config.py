@@ -44,7 +44,6 @@ PROVIDER_TYPES: tuple[str, ...] = (
     "bai",
     "nvidia-nim",
     "cline",
-    "workbuddy",
     "opencode",
     "hermes",
     "ifm",

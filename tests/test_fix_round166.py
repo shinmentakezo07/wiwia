@@ -153,7 +153,7 @@ def test_annotated_config_resolves_every_provider_it_references() -> None:
     # about the ones that are not known provider types.
     known_types = {
         "openai", "anthropic", "gemini", "openai-compatible", "openrouter",
-        "gmicloud", "bai", "nvidia-nim", "cline", "workbuddy", "opencode",
+        "gmicloud", "bai", "nvidia-nim", "cline", "opencode",
         "hermes",
     }
     missing = referenced - declared - known_types

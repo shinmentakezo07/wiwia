@@ -235,7 +235,6 @@ _ADAPTERS = (
     ("nvidia-nim", "nvidia/m"),
     ("opencode", "opencode/m"),
     ("openrouter", "anthropic/claude-x"),
-    ("workbuddy", "m"),
     ("anthropic", "claude-x"),
     ("gemini", "gemini-x"),
     ("hermes", "Hermes-4-405B"),

@@ -1,6 +1,6 @@
 # wiwi — Provider Setup Guide
 
-wiwi ships **13 provider types** (`PROVIDER_TYPES` in `wiwi/config.py`): `openai`, `anthropic`, `gemini`, `openai-compatible`, `openrouter`, `gmicloud`, `bai`, `nvidia-nim`, `cline`, `workbuddy`, `opencode`, `hermes`, `ifm`. Each maps to an adapter in `wiwi/providers/` that encodes IR → provider wire format and decodes responses/stream events back to IR.
+wiwi ships **12 provider types** (`PROVIDER_TYPES` in `wiwi/config.py`): `openai`, `anthropic`, `gemini`, `openai-compatible`, `openrouter`, `gmicloud`, `bai`, `nvidia-nim`, `cline`, `opencode`, `hermes`, `ifm`. Each maps to an adapter in `wiwi/providers/` that encodes IR → provider wire format and decodes responses/stream events back to IR.
 
 Adding a provider = new adapter module + one branch in `get_adapter()` (`wiwi/providers/registry.py`) + the entry in `PROVIDER_TYPES`. The registry has an import-time assert that fails loudly if a type has no branch.
 
@@ -17,7 +17,6 @@ Adding a provider = new adapter module + one branch in `get_adapter()` (`wiwi/pr
 | `bai` | Chat Completions | Bearer key | B.AI unified gateway; one key, three protocols — wiwi speaks Chat to it |
 | `nvidia-nim` | Chat Completions | Bearer key | vLLM-backed quirks: reasoning via `chat_template_kwargs`, tool-schema rewrite |
 | `cline` | Chat Completions | WorkOS OAuth bearer (`workos:` prefix) | OAuth + live Cline CLI/core fingerprint + auto-refresh |
-| `workbuddy` | Chat Completions | Access token from auth JSON | Tencent CodeBuddy quirks + auto-refresh |
 | `opencode` | Per-model: 4 upstream protocols | Bearer key | Multi-protocol routing, live User-Agent refresh |
 | `hermes` | Chat Completions | Nous API key **or** OAuth device-code token (`hermes:` prefix) | Nous Portal (`inference-api.nousresearch.com`); no Realtime WS surface |
 | `ifm` | Chat Completions | Bearer key | IFM / MBZUAI: `reasoning_content` replay, effort via `chat_template_kwargs`, `X-Session-ID` affinity, text-only |
@@ -171,27 +170,6 @@ providers:
 ```
 
 Connect via the admin UI (Providers → Cline → Connect) or the OAuth endpoints (`/admin/cline/oauth/*`). The callback lands on `/cline/oauth/callback`.
-
-## `workbuddy`
-
-WorkBuddy / CodeBuddy (Tencent) — OpenAI Chat Completions-compatible with four quirks (ported from workbuddy2api):
-
-1. **Auth**: the key secret is a WorkBuddy **auth JSON** (nested or flat — `workbuddy_auth.py` normalizes both); requests carry the derived access token.
-2. Fingerprint/headers as upstream expects.
-3. Auto-refresh background service (shared `CircuitBreaker` primitive from `wiwi/core/recovery.py`).
-4. Account import/export via admin endpoints.
-
-As with Cline there is **no** `client_id` / `client_secret` — `workbuddy_auth.py` reads no environment variables. Accounts are imported, and the auth JSON lands in the key pool:
-
-```yaml
-providers:
-  - name: workbuddy-main
-    provider: workbuddy
-    base_url: https://copilot.tencent.com   # default
-    keys: []                                 # filled in by import
-```
-
-Import accounts via `/admin/workbuddy/import` or the admin UI.
 
 ## `opencode`
 

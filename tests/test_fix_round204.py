@@ -135,8 +135,8 @@ def test_oauth_resets_go_through_recover_force_not_hand_setting():
     failure streak."""
     import inspect
 
-    from wiwi.providers import cline_auto_refresh, hermes_auto_refresh, workbuddy_auto_refresh
-    for mod in (cline_auto_refresh, hermes_auto_refresh, workbuddy_auto_refresh):
+    from wiwi.providers import cline_auto_refresh, hermes_auto_refresh
+    for mod in (cline_auto_refresh, hermes_auto_refresh):
         src = inspect.getsource(mod)
         assert 'status = "active"' not in src, mod.__name__
         assert "recover(force=True)" in src, mod.__name__

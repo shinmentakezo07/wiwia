@@ -12,7 +12,7 @@
 // The third card is documentation, not decoration: the three facts that
 // otherwise turn into support questions — hashes restore working credentials
 // but can never re-display them, the audit trail is export-only, and
-// OAuth/WorkBuddy accounts ride in the keys section.
+// OAuth accounts ride in the keys section.
 
 import { useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -565,7 +565,7 @@ export function BackupTab() {
             <span>
               <strong className="text-[var(--admin-text)]">OAuth accounts need the secrets
               toggle.</strong>{" "}
-              A connected Cline, WorkBuddy, or Hermes account keeps its access token on a
+              A connected Cline or Hermes account keeps its access token on a
               provider key, and its refresh token in a gateway setting. Both are withheld
               unless plaintext secrets are included: without the toggle the file records that
               the account exists, but not the tokens — so a restore keeps your live accounts

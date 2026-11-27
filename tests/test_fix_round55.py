@@ -417,9 +417,9 @@ async def test_rename_does_not_strand_an_alias_for_a_reused_name(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _force_stream_config(db_path: str) -> WiwiConfig:
-    """WorkBuddy is ``force_stream``: its upstream has no non-streaming mode."""
+    """Cline is ``force_stream``: its upstream has no non-streaming mode."""
     return WiwiConfig(
-        providers=[ProviderDef(name="wb", provider="workbuddy",
+        providers=[ProviderDef(name="wb", provider="cline",
                                base_url="https://api.example.com/v1",
                                keys=[KeyDef(label="k1", key="tok")])],
         model_list=[ModelEntry(
@@ -499,7 +499,7 @@ def test_force_stream_transport_error_becomes_a_retryable_wiwi_error():
 
 
 def test_force_stream_prices_estimated_usage_when_upstream_omits_it():
-    """Cline/WorkBuddy pop ``stream_options``, so no-usage is the normal case.
+    """Cline pops ``stream_options``, so no-usage is the normal case.
 
     Pre-fix this path priced the zeros directly and reported
     ``estimated=False``, presenting $0.00 as provider-reported fact
@@ -521,7 +521,7 @@ def test_force_stream_prices_estimated_usage_when_upstream_omits_it():
         cfg = _force_stream_config(":memory:")
         router = Router(cfg)
         cost = CostEngine({})
-        cost.prices["workbuddy/m"] = {"input_cost_per_token": 1e-6,
+        cost.prices["cline/m"] = {"input_cost_per_token": 1e-6,
                                       "output_cost_per_token": 1e-6}
         gw = Gateway(router, cost, drop_params=True)
         try:
@@ -533,9 +533,7 @@ def test_force_stream_prices_estimated_usage_when_upstream_omits_it():
             adapter = fresh_adapter(dep.provider.provider_type)
 
             with respx.mock:
-                # WorkBuddyAdapter.build_url appends /v2 (its upstream has no
-                # plain /chat/completions route), so the mock must match it.
-                respx.post("https://api.example.com/v1/v2/chat/completions").respond(
+                respx.post("https://api.example.com/v1/chat/completions").respond(
                     text=body, headers={"content-type": "text/event-stream"})
                 turn = await gw._complete_via_stream(dep, key, ctx, adapter)
 

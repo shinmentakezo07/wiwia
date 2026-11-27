@@ -79,11 +79,11 @@ print('v1', len([r for r in routes if r[1].startswith('/v1')]),
       'admin', len([r for r in routes if r[1].startswith('/admin')]))"
 ```
 
-### Outbound provider types (13)
+### Outbound provider types (12)
 
 `openai`, `openai-compatible`, `gmicloud`, `bai` (all four share the OpenAI wire shape —
 `registry._OPENAI_WIRE_TYPES`), `anthropic`, `gemini`, `openrouter`, `nvidia-nim`, `opencode`
-(Zen), `cline` (OAuth), `workbuddy` (OAuth), `hermes` (Nous Portal), `ifm` (MBZUAI — Chat
+(Zen), `cline` (OAuth), `hermes` (Nous Portal), `ifm` (MBZUAI — Chat
 wire with `reasoning_content` replay, `chat_template_kwargs` effort and `X-Session-ID`
 affinity).
 
@@ -101,7 +101,7 @@ with no `Finish`. All delta variants are `@dataclass(frozen=True)`.
 |---|---|
 | `wiwi/wire/` | Inbound codecs + encoders per dialect: `openai_chat.py`, `openai_responses.py`, `anthropic_messages.py`, `openai_completions.py` (legacy `/v1/completions`) |
 | `wiwi/ir/` | Canonical IR: `types.py` (tagged parts, messages, tools, `GenParams`, `Usage`), `builtin_tools.py`, `translation.py` (dialect↔IR translation helpers) |
-| `wiwi/providers/` | Outbound adapters (`<provider>_adapter.py`) + `base.py` (`ProviderAdapter` protocol, `WiwiError`), `registry.py`, `token_expiry.py`, and the OAuth support files `cline_oauth.py`, `cline_auto_refresh.py`, `cline_version.py`, `workbuddy_auth.py`, `workbuddy_auto_refresh.py`, `workbuddy_version.py`, `hermes_oauth.py`, `hermes_auto_refresh.py`, `opencode_version.py`, `nim_tool_schema.py`, `nim_native_tools.py`. `openai-compatible` and `gmicloud` have no adapter file — they resolve to the `openai` adapter via `_OPENAI_WIRE_TYPES` |
+| `wiwi/providers/` | Outbound adapters (`<provider>_adapter.py`) + `base.py` (`ProviderAdapter` protocol, `WiwiError`), `registry.py`, `token_expiry.py`, and the OAuth support files `cline_oauth.py`, `cline_auto_refresh.py`, `cline_version.py`, `hermes_oauth.py`, `hermes_auto_refresh.py`, `opencode_version.py`, `nim_tool_schema.py`, `nim_native_tools.py`. `openai-compatible` and `gmicloud` have no adapter file — they resolve to the `openai` adapter via `_OPENAI_WIRE_TYPES` |
 | `wiwi/router/` | `router.py`: `ProviderKey`/`ProviderAccount`/`Deployment`/`Router`, smooth WRR, cooldowns, fallbacks |
 | `wiwi/core/` | `gateway.py` (~3.0k lines; execution engine, pricing, log events), `context.py` (`RequestContext`), `recovery.py`, `telemetry.py` |
 | `wiwi/streaming/` | `deltas.py` (taxonomy), `sse.py`, `partial_json.py`, `validation.py`, `resume.py` (`StreamTape`), `tape_store.py` (`JournalStore`), `coalesce.py`, `loopdetect.py` |

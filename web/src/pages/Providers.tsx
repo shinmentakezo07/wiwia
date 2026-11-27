@@ -55,7 +55,6 @@ const PROVIDER_TYPE_OPTIONS = [
   { value: "openrouter", label: "OpenRouter" },
   { value: "gmicloud", label: "GMI Cloud" },
   { value: "bai", label: "B.AI" },
-  { value: "workbuddy", label: "WorkBuddy" },
   { value: "cline", label: "Cline" },
   { value: "opencode", label: "OpenCode Zen" },
   { value: "hermes", label: "Hermes (Nous Portal)" },
@@ -1059,7 +1058,7 @@ export function ProvidersPage() {
               options={PROVIDER_TYPE_OPTIONS}
             />
           </Field>
-          <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud/bai/workbuddy/nvidia-nim/cline/opencode/hermes/ifm. Required for compatible URLs.">
+          <Field label="Base URL" hint="Optional for openai/anthropic/gemini/openrouter/gmicloud/bai/nvidia-nim/cline/opencode/hermes/ifm. Required for compatible URLs.">
             <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" />
           </Field>
           <Field label="First key label">

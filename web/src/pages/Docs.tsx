@@ -621,7 +621,6 @@ const PROVIDERS: { id: string; wire: Wire; note: string; src?: string }[] = [
   { id: "anthropic", wire: "native", note: "Native Messages protocol, including opt-in prompt-cache breakpoints per deployment.", src: "/logos/anthropic.svg" },
   { id: "gemini", wire: "native", note: "Native generateContent.", src: "/logos/gemini.svg" },
   { id: "cline", wire: "sse", note: "OAuth. The upstream has no non-streaming mode, so replies are reassembled for non-streaming callers.", src: "/logos/cline.svg" },
-  { id: "workbuddy", wire: "sse", note: "OAuth, streaming-only upstream for the same reason.", src: "/logos/workbuddy.svg" },
   { id: "opencode", wire: "sse", note: "OAuth or console key. Access depends on the request matching the current OpenCode client.", src: "/logos/opencode.svg" },
 ];
 

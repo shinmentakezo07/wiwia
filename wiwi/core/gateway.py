@@ -102,7 +102,7 @@ def _error_message_for_log(err: Any) -> str:
 #: seen to do the same in production). The strict parser would drop the
 #: whole body, and the gateway would report "upstream stream ended
 #: without completion" on a healthy turn (round 194 follow-up).
-_UNFRAMED_STREAM_PROVIDERS = frozenset({"cline", "workbuddy", "opencode"})
+_UNFRAMED_STREAM_PROVIDERS = frozenset({"cline", "opencode"})
 
 
 def _allow_unframed_for(provider_type: str) -> bool:

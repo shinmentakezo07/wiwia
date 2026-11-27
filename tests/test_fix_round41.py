@@ -807,26 +807,6 @@ async def test_provider_key_non_string_secret_rejected():
 
 
 # ---------------------------------------------------------------------------
-# #87 — an unknown WorkBuddy business envelope must be retryable
-# ---------------------------------------------------------------------------
-
-def test_workbuddy_unknown_envelope_is_retryable():
-    """An unknown ``{code, msg}`` envelope must be retryable so failover runs.
-
-    Pre-fix it was non-retryable, failing the client immediately instead of
-    trying another deployment/key (AUDIT #87).
-    """
-    from wiwi.providers.workbuddy_adapter import _envelope_error
-
-    err = _envelope_error({"code": 11102, "msg": "transient upstream hiccup"})
-    assert err.retryable is True, (
-        f"unknown envelope code was {err.status} retryable={err.retryable}")
-    # Credit exhaustion stays non-retryable and maps to 402.
-    credit = _envelope_error({"code": 402, "msg": "insufficient credit"})
-    assert credit.status == 402 and credit.retryable is False
-
-
-# ---------------------------------------------------------------------------
 # #88 — NIM must adopt a synthesized open when a real id arrives later
 # ---------------------------------------------------------------------------
 

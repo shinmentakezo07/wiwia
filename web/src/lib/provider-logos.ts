@@ -15,7 +15,6 @@ export const PROVIDER_LOGO: Record<string, string> = {
   gmicloud: "/logos/gmicloud.svg",
   bai: "/logos/bai.svg",
   cline: "/logos/cline.svg",
-  workbuddy: "/logos/workbuddy.svg",
   "nvidia-nim": "/logos/nvidia-nim.svg",
   opencode: "/logos/opencode.svg",
   hermes: "/logos/hermes.svg",

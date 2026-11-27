@@ -71,7 +71,7 @@ const FAQS: { question: string; answer: string }[] = [
   {
     question: "Which providers does the gateway support?",
     answer:
-      "Thirteen outbound provider types — OpenAI, Anthropic, Gemini, OpenRouter, NVIDIA NIM, GMI Cloud, B.AI, OpenCode, Cline, WorkBuddy, Hermes, IFM, and any OpenAI-compatible endpoint — through one OpenAI-compatible inbound API.",
+      "Twelve outbound provider types — OpenAI, Anthropic, Gemini, OpenRouter, NVIDIA NIM, GMI Cloud, B.AI, OpenCode, Cline, Hermes, IFM, and any OpenAI-compatible endpoint — through one OpenAI-compatible inbound API.",
   },
 ];
 

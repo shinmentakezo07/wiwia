@@ -52,7 +52,7 @@ const GATEWAY_FEATURES: Feature[] = [
   {
     icon: Layers,
     title: "Thirteen provider types",
-    body: "OpenAI, Anthropic, Gemini, OpenRouter, NVIDIA NIM, GMI Cloud, B.AI, OpenCode, Cline, WorkBuddy, Hermes, IFM, and any OpenAI-compatible endpoint.",
+    body: "OpenAI, Anthropic, Gemini, OpenRouter, NVIDIA NIM, GMI Cloud, B.AI, OpenCode, Cline, Hermes, IFM, and any OpenAI-compatible endpoint.",
   },
   {
     icon: KeyRound,

@@ -595,7 +595,7 @@ class HealthHealer:
             verdict = probe_verdict(
                 resp.status_code, resp.content,
                 allow_unframed=dep.provider.provider_type in (
-                    "cline", "workbuddy", "opencode"))
+                    "cline", "opencode"))
             if verdict is ProbeVerdict.HEALTHY:
                 return ProbeVerdict.HEALTHY, "", None
             # A 200 whose body is a business-error envelope (dead session):

@@ -6,7 +6,7 @@
 // and the page shows that identity, its refresh state, and its pool weight.
 //
 // Models are deliberately not added per account here. `DefaultModelsCard`
-// (Cline) and `SharedModelsCard` (WorkBuddy/Hermes) add one model id to every
+// (Cline) and `SharedModelsCard` (Hermes) add one model id to every
 // account of the type at once; `DeploymentsCard` then shows and detaches what
 // this provider actually serves.
 
@@ -15,7 +15,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
-  Briefcase,
+
   ExternalLink,
   Hexagon,
   Link2,
@@ -27,7 +27,6 @@ import {
   deleteProviderKey,
   getProviders,
   patchProviderKey,
-  workbuddyAccounts,
 } from "@/api/client";
 import type { Provider } from "@/api/types";
 import {
@@ -42,7 +41,6 @@ import {
 } from "@/pages/ProviderDetail";
 import { DefaultModelsCard } from "@/pages/oauth-routing";
 import { SharedModelsCard } from "@/pages/oauth-models";
-import { WorkBuddyAccountsTable } from "@/pages/workbuddy-shared";
 import {
   Alert,
   Badge,
@@ -64,11 +62,10 @@ const TYPE_META: Record<
   { label: string; prefix: string; icon: typeof Link2 }
 > = {
   cline: { label: "Cline", prefix: "cline", icon: Link2 },
-  workbuddy: { label: "WorkBuddy", prefix: "workbuddy", icon: Briefcase },
   hermes: { label: "Hermes", prefix: "hermes", icon: Hexagon },
 };
 
-// -- one pool-key account (WorkBuddy / Hermes) ---------------------------------
+// -- one pool-key account (Hermes) ---------------------------------
 
 function KeyAccountSettingsCard(props: {
   p: Provider;
@@ -202,75 +199,6 @@ function KeyAccountSettingsCard(props: {
         </p>
       </Dialog>
     </Card>
-  );
-}
-
-// -- WorkBuddy account ---------------------------------------------------------
-
-function WorkBuddyAccountSection(props: {
-  p: Provider;
-  account: string;
-  onError: (m: string) => void;
-}) {
-  const q = useQuery({
-    queryKey: ["workbuddy-accounts"],
-    queryFn: workbuddyAccounts,
-    refetchInterval: 15_000,
-  });
-  const account = useMemo(
-    () =>
-      (q.data?.accounts ?? []).find(
-        (a) =>
-          a.provider === props.p.name &&
-          (a.label === props.account || a.nickname === props.account),
-      ),
-    [q.data, props.p.name, props.account],
-  );
-
-  if (q.isLoading) {
-    return (
-      <Card>
-        <Spinner />
-      </Card>
-    );
-  }
-  if (q.isError) {
-    return (
-      <Card>
-        <div className="px-5 py-4">
-          <ErrorText>{q.error.message}</ErrorText>
-        </div>
-      </Card>
-    );
-  }
-  if (!account) {
-    return (
-      <Card>
-        <EmptyState>
-          This WorkBuddy account was not found. It may have been removed or moved
-          to a different provider.
-        </EmptyState>
-      </Card>
-    );
-  }
-
-  return (
-    <>
-      <Card>
-        <CardHeader
-          title="WorkBuddy account"
-          subtitle={`${account.provider} · ${account.label}`}
-        />
-        <div className="px-5 pb-5 pt-4">
-          <WorkBuddyAccountsTable accounts={[account]} onError={props.onError} />
-        </div>
-      </Card>
-      <KeyAccountSettingsCard
-        p={props.p}
-        keyLabel={account.label}
-        onError={props.onError}
-      />
-    </>
   );
 }
 
@@ -475,8 +403,6 @@ export function OAuthAccountDetailPage() {
             <AccountSettingsCard p={p} onError={setError} />
             <KeyPoolCard p={p} providerName={p.name} onError={setError} />
           </>
-        ) : p.provider_type === "workbuddy" ? (
-          <WorkBuddyAccountSection p={p} account={account} onError={setError} />
         ) : (
           <HermesAccountSection p={p} account={account} onError={setError} />
         )}

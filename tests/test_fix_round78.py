@@ -307,15 +307,14 @@ def test_real_usage_counters_still_forwarded():
 
 
 def test_openai_wire_subclasses_inherit_the_null_usage_guard():
-    """#194 names cline/workbuddy/bai as inheriting the OpenAI usage read;
+    """#194 names cline/bai as inheriting the OpenAI usage read;
     each must coerce through ``super()`` rather than re-read the raw dict."""
     from wiwi.providers.bai_adapter import BAIAdapter
     from wiwi.providers.cline_adapter import ClineAdapter
-    from wiwi.providers.workbuddy_adapter import WorkBuddyAdapter
 
     frame = {"choices": [],
              "usage": {"prompt_tokens": None, "completion_tokens": None}}
-    for cls in (ClineAdapter, WorkBuddyAdapter, BAIAdapter):
+    for cls in (ClineAdapter, BAIAdapter):
         u = _openai_wire_null_usage(cls(), frame)
         assert (u.prompt, u.output) == (0, 0), cls.__name__
         assert u.prompt + u.output == 0, cls.__name__

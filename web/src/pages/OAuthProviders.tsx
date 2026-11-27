@@ -1,5 +1,5 @@
 // Connected accounts — the single place to add and manage every OAuth-backed
-// provider account this gateway holds: Cline, WorkBuddy, and Hermes (Nous
+// provider account this gateway holds: Cline and Hermes (Nous
 // Portal).
 //
 // Each provider keeps its own flow, because their OAuth shapes genuinely
@@ -19,7 +19,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   ArrowRight,
-  Briefcase,
+
   Hexagon,
   Link2,
   Loader2,
@@ -28,7 +28,7 @@ import {
   Unlink,
   Users,
 } from "lucide-react";
-import { addProvider, getProviders, workbuddyAccounts } from "@/api/client";
+import { addProvider, getProviders } from "@/api/client";
 import type { Provider } from "@/api/types";
 import {
   Alert,
@@ -58,7 +58,6 @@ import {
 } from "@/pages/oauth-shared";
 import { CrossAccountRoutingCard, DefaultModelsCard } from "@/pages/oauth-routing";
 import { HermesOAuthPanel } from "@/pages/HermesOAuth";
-import { WorkBuddyOAuthPanel } from "@/pages/oauth-workbuddy";
 
 const CLINE_DEFAULT_BASE = "https://api.cline.bot/api/v1";
 
@@ -374,7 +373,7 @@ function ClineAccountsPanel() {
 
 // -- provider chooser / provider page ------------------------------------------
 
-type OAuthTab = "cline" | "workbuddy" | "hermes";
+type OAuthTab = "cline" | "hermes";
 
 const OAUTH_TABS: {
   id: OAuthTab;
@@ -388,13 +387,6 @@ const OAUTH_TABS: {
     icon: Link2,
     blurb:
       "Route requests through your Cline subscription. Connecting opens Cline's login and asks you to paste the callback URL back.",
-  },
-  {
-    id: "workbuddy",
-    label: "WorkBuddy",
-    icon: Briefcase,
-    blurb:
-      "Sign in with a WorkBuddy / CodeBuddy account. The provider is created on first login, and bulk import/export stays available.",
   },
   {
     id: "hermes",
@@ -417,15 +409,9 @@ function useOAuthCounts() {
     queryFn: getProviders,
     refetchInterval: 15_000,
   });
-  const workbuddyQ = useQuery({
-    queryKey: ["workbuddy-accounts"],
-    queryFn: workbuddyAccounts,
-    refetchInterval: 15_000,
-  });
   const providers = providersQ.data?.providers ?? [];
   const counts: Record<OAuthTab, number> = {
     cline: providers.filter((p) => p.provider_type === "cline").length,
-    workbuddy: workbuddyQ.data?.accounts.length ?? 0,
     hermes: providers
       .filter((p) => p.provider_type === "hermes")
       .reduce((n, p) => n + p.keys.length, 0),
@@ -568,7 +554,7 @@ export function OAuthProviderPage() {
     <div>
       <PageHeader
         title="Connected accounts"
-        subtitle="Cline, WorkBuddy, and Hermes accounts — choose a provider"
+        subtitle="Cline and Hermes accounts — choose a provider"
         right={
           <Link to="/console/oauth">
             <Button variant="ghost" className="min-h-11">
@@ -633,14 +619,6 @@ export function OAuthProviderPage() {
           hidden={tab !== "cline"}
         >
           <ClineAccountsPanel />
-        </div>
-        <div
-          role="tabpanel"
-          id="oauth-panel-workbuddy"
-          aria-labelledby="oauth-tab-workbuddy"
-          hidden={tab !== "workbuddy"}
-        >
-          <WorkBuddyOAuthPanel />
         </div>
         <div
           role="tabpanel"

@@ -108,8 +108,8 @@ const ADMIN_ONLY_SECTIONS: NavSection[] = [
     items: [
       { to: "/console/providers", label: "Providers", icon: Server },
       // Every OAuth-backed account type is added and managed from this one
-      // page (Cline, WorkBuddy, Hermes). The dedicated WorkBuddy / Hermes OAuth
-      // / Account login pages remain reachable by URL for bulk import-export
+      // page (Cline, Hermes). The dedicated Hermes OAuth
+      // page remain reachable by URL for bulk import-export
       // and deep links, but they no longer each take a sidebar row.
       { to: "/console/oauth", label: "Accounts", icon: Link2 },
       { to: "/console/hermes", label: "Hermes", icon: Hexagon },
@@ -130,7 +130,6 @@ const ADMIN_ONLY_SECTIONS: NavSection[] = [
 
 const OAUTH_TITLES: Record<string, string> = {
   cline: "Cline",
-  workbuddy: "WorkBuddy",
   hermes: "Hermes",
 };
 
@@ -143,8 +142,6 @@ const PAGE_META: Record<string, { title: string; section: string }> = {
   "/console/analytics": { title: "Analytics", section: "Traffic" },
   "/console/providers": { title: "Providers", section: "Configuration" },
   "/console/oauth": { title: "Connected accounts", section: "Configuration" },
-  "/console/login": { title: "Account login", section: "Configuration" },
-  "/console/workbuddy": { title: "WorkBuddy", section: "Configuration" },
   "/console/hermes": { title: "Hermes", section: "Configuration" },
   "/console/hermes-oauth": { title: "Hermes OAuth", section: "Configuration" },
   "/console/builtin-providers": { title: "Built-in Providers", section: "Configuration" },

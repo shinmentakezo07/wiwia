@@ -366,7 +366,6 @@ def test_all_envelope_call_sites_opt_in():
 
     # The gate itself is the source of truth: envelope providers in, others out.
     assert gw._allow_unframed_for("cline") is True
-    assert gw._allow_unframed_for("workbuddy") is True
     assert gw._allow_unframed_for("openai") is False
     assert gw._allow_unframed_for("anthropic") is False
     # opencode (Zen) is force_stream and its chat route can answer a

@@ -143,7 +143,6 @@ def test_absent_tool_choice_stays_unconstrained():
 
 def test_allow_unframed_only_for_envelope_providers():
     assert _allow_unframed_for("cline") is True
-    assert _allow_unframed_for("workbuddy") is True
     assert _allow_unframed_for("openai") is False
     assert _allow_unframed_for("anthropic") is False
     assert _allow_unframed_for("gemini") is False

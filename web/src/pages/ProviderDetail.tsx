@@ -5,7 +5,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Boxes, Briefcase, CheckCircle2, ChevronDown, ChevronUp, Cloud, Cpu, Eye, EyeOff, Globe, KeyRound, Layers, Link2, Loader2, LogIn, Plus, RefreshCw, Search, Server, Settings, Sparkles, Sunrise, Trash2, Unlink, X, Zap } from "lucide-react";
+import { ArrowLeft, Boxes, CheckCircle2, ChevronDown, ChevronUp, Cloud, Cpu, Eye, EyeOff, Globe, KeyRound, Layers, Link2, Loader2, LogIn, Plus, RefreshCw, Search, Server, Settings, Sparkles, Sunrise, Trash2, Unlink, X, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
   addDeployment,
@@ -76,7 +76,6 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
   "openai-compatible": Server,
   gmicloud: Cloud,
   bai: Globe,
-  workbuddy: Briefcase,
   cline: Link2,
   opencode: Layers,
   hermes: Sparkles,
@@ -91,7 +90,6 @@ const PROVIDER_TYPE_OPTIONS = [
   { value: "openrouter", label: "OpenRouter" },
   { value: "gmicloud", label: "GMI Cloud" },
   { value: "bai", label: "B.AI" },
-  { value: "workbuddy", label: "WorkBuddy" },
   { value: "cline", label: "Cline" },
   { value: "opencode", label: "OpenCode Zen" },
   { value: "hermes", label: "Hermes (Nous Portal)" },

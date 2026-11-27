@@ -410,7 +410,7 @@ const FAQ = [
   },
   {
     q: "Which providers does it support?",
-    a: "Thirteen outbound provider types: OpenAI, Anthropic, Gemini, OpenRouter, NVIDIA NIM, GMI Cloud, B.AI, OpenCode, Cline, WorkBuddy, Hermes, IFM, and any OpenAI-compatible endpoint. Model names come from your own model_list, so the catalog is whatever you configure.",
+    a: "Twelve outbound provider types: OpenAI, Anthropic, Gemini, OpenRouter, NVIDIA NIM, GMI Cloud, B.AI, OpenCode, Cline, Hermes, IFM, and any OpenAI-compatible endpoint. Model names come from your own model_list, so the catalog is whatever you configure.",
   },
   {
     q: "What happens when a provider fails?",
