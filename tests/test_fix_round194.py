@@ -24,12 +24,12 @@ wrong side of a boundary.
 
 3. **`allow_unframed=True` for every provider.** Two gateway stream arms
    and the recovery probe built ``LineSSEParser(allow_unframed=True)``
-   unconditionally, citing "envelope providers (Cline/WorkBuddy)" in the
+   unconditionally, citing "envelope providers (Cline)" in the
    comment while the code applied the lenient parser to *all* providers. A
    strictly-framed SSE provider emitting a stray unframed JSON line (relay
    pretty-print, error envelope without ``data:``) would be fed to
    ``decode_stream_event`` where the strict parser drops it. Now the flag
-   is gated on the deployment's provider type (``cline`` / ``workbuddy``)
+   is gated on the deployment's provider type (``cline``)
    so the strict parser is the default everywhere else.
 
 4. **Redis limiter minted a fresh ``uuid4()`` per scope when

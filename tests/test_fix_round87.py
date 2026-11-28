@@ -11,14 +11,14 @@ transport::
 ``OpencodeAdapter`` is the wiwi transport for the same gateway, and it shipped
 ``force_stream = False``: the declaration was missing, so a non-streaming
 caller was routed to ``Gateway._call_once`` (JSON decode) instead of
-``_complete_via_stream`` (SSE pump + reassembly) — the path Cline and
-WorkBuddy take because their upstreams are streaming-only too.
+``_complete_via_stream`` (SSE pump + reassembly) — the path Cline
+takes because its upstream is streaming-only too.
 
 Declaring the flag alone is not enough. The pump asks ``build_url`` for the
 streaming URL but encodes the *client's* request, whose ``stream`` field is
 still false, so the upstream would be told "don't stream" on a connection the
 gateway then parses as SSE. Both halves land here, exactly as in
-``cline_adapter.encode_request`` / ``workbuddy_adapter.encode_request``:
+``cline_adapter.encode_request``:
 
 - ``force_stream = True`` on the adapter (the transport declaration), and
 - ``encode_request`` forcing ``stream: true`` on every body that carries the

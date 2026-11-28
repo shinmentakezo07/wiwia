@@ -274,9 +274,9 @@ def test_public_url_setting_exists():
 
 
 def test_request_base_does_not_honour_forwarded_host():
-    from wiwi.server import app as app_mod
+    from wiwi.server.routers import cline_oauth as cline_oauth_router
 
-    src = inspect.getsource(app_mod)
+    src = inspect.getsource(cline_oauth_router)
     block = src[src.index("def _request_base"):]
     block = block[:block.index("def _cline_callback_redirect")]
     assert "x-forwarded-host" not in block, (
@@ -287,7 +287,10 @@ def test_request_base_does_not_honour_forwarded_host():
 
 
 def test_playground_key_constants_are_bounded():
-    from wiwi.server.app import _MAX_PLAYGROUND_KEYS_PER_USER, _PLAYGROUND_KEY_TTL_S
+    from wiwi.server.services.playground import (
+        MAX_PLAYGROUND_KEYS_PER_USER as _MAX_PLAYGROUND_KEYS_PER_USER,
+    )
+    from wiwi.server.services.playground import PLAYGROUND_KEY_TTL_S as _PLAYGROUND_KEY_TTL_S
 
     assert _PLAYGROUND_KEY_TTL_S > 0
     assert 0 < _MAX_PLAYGROUND_KEYS_PER_USER <= 25

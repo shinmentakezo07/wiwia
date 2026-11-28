@@ -165,7 +165,7 @@ def test_effective_reasoning_effort_survives_a_non_numeric_budget():
     """The GenParams accessor must not propagate the raise to its six callers.
 
     ``effective_reasoning_effort`` runs inside ``encode_request`` on openai, bai,
-    nim, opencode, openrouter and workbuddy. A raise here is a 500 before any
+    nim, opencode and openrouter. A raise here is a 500 before any
     upstream call. With no ``effort``/``reasoning_effort`` set, a broken budget
     must degrade to the effort ``"none"`` (thinking off) rather than raise —
     the same "leave thinking OFF, never enable it at an arbitrary budget" rule

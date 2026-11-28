@@ -1,6 +1,6 @@
 """Round 91 — the healer must not call a 200 error body HEALTHY.
 
-AUDIT #269. ``probe_verdict(status, body)`` recognized only WorkBuddy's
+AUDIT #269. ``probe_verdict(status, body)`` recognized only the
 ``{"code": <non-zero>, "msg": …}`` envelope, so an Anthropic- or OpenAI-shaped
 upstream answering HTTP 200 with its own error object was declared HEALTHY —
 and the healer's job is to *restore* a credential on a successful probe, so it
@@ -130,7 +130,7 @@ class TestProbeRequestCarriesTheDeploymentModel:
 class TestAnthropicAndOpenAI200ErrorEnvelopesAreNotHealthy:
     """AUDIT #269 (second half) — the 200-envelope check must not be one shape.
 
-    ``probe_verdict`` recognizes WorkBuddy's ``{"code": N, "msg": …}`` envelope
+    ``probe_verdict`` recognizes the ``{"code": N, "msg": …}`` envelope
     and nothing else. Anthropic and OpenAI ride business errors on HTTP 200 as
     their own dialect-shaped error objects, which decode into an empty turn with
     no exception — so the probe called a dead key healthy and restored it.
@@ -173,7 +173,7 @@ class TestAnthropicAndOpenAI200ErrorEnvelopesAreNotHealthy:
         assert probe_verdict(200, None) is ProbeVerdict.HEALTHY
         assert probe_verdict(200, b"") is ProbeVerdict.HEALTHY
 
-    # Force-stream providers (cline, workbuddy, opencode) answer the probe with
+    # Force-stream providers (cline, opencode) answer the probe with
     # SSE even on HTTP 200, so the error object arrives inside a ``data:`` frame
     # rather than as a bare JSON body. That arm is a *separate* branch in
     # ``_body_is_error_envelope`` — it has its own parse loop — and the four

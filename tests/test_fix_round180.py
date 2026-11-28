@@ -238,15 +238,18 @@ async def test_pending_oauth_sessions_are_one_store_with_per_flow_ttl():
     app, lm, _client = await _boot(_config())
     try:
         state = app.state.wiwi
-        state.oauth_pending["hermes"] = {
-            "kind": "hermes_device_code", "created_at": 0.0, "ttl_s": 600.0}
-        state.oauth_pending["workbuddy"] = {
-            "kind": "workbuddy_login", "created_at": 0.0, "ttl_s": 5000.0}
+        state.oauth_pending["tok1"] = {
+            "kind": "cline_redirect", "provider": "cline",
+            "return_path": "/console", "created_at": 0.0, "ttl_s": 600.0}
+        state.oauth_pending["tok2"] = {
+            "kind": "hermes_device_code", "provider": "hermes",
+            "device_code": "d", "interval": 5, "created_at": 0.0,
+            "ttl_s": 5000.0}
 
         state.evict_expired_pending(now=1000.0)
 
-        assert "hermes" not in state.oauth_pending
-        assert "workbuddy" in state.oauth_pending, (
+        assert "tok1" not in state.oauth_pending
+        assert "tok2" in state.oauth_pending, (
             "one flow's TTL shortened another flow's window")
     finally:
         await _client.aclose()
