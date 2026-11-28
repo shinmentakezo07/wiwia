@@ -5,6 +5,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import type {
   AnchorHTMLAttributes,
   ButtonHTMLAttributes,
+  ComponentProps,
   InputHTMLAttributes,
   KeyboardEvent as ReactKeyboardEvent,
   ReactNode,
@@ -166,6 +167,32 @@ export function Button(
   // An unqualified <button> inside any form submits it. Every shared action
   // button is a command, not a submit; callers can still opt in with `type`.
   return <button type={type ?? "button"} className={cls} {...rest} />;
+}
+/** Ghost icon button: a bare lucide glyph on the shared 44px hit target.
+ *  `label` is both the accessible name and the tooltip; page-specific layout
+ *  (positioning, size overrides) rides `className`, appended last so it wins.
+ *  `tone="danger"` swaps the hover/ring treatment for destructive actions. */
+export function IconButton(
+  { label, tone, className, children, ...rest }: ComponentProps<"button"> & {
+    label: string;
+    tone?: "default" | "danger";
+  },
+) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-[var(--admin-text-dim)] transition-colors focus-visible:outline-none focus-visible:ring-2 ${
+        tone === "danger"
+          ? "hover:bg-red-500/10 hover:text-red-400 focus-visible:ring-red-400/50"
+          : "hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:ring-blue-400/50"
+      } ${className ?? ""}`}
+      {...rest}
+    >
+      {children}
+    </button>
+  );
 }
 
 /** Text input. `ref` is accepted as a plain prop (React 19 semantics onward) so
@@ -641,16 +668,11 @@ export function Alert(props: {
         {props.action && <div className="mt-2.5 flex flex-wrap items-center gap-2">{props.action}</div>}
       </div>
       {props.onDismiss && (
-        <button
-          type="button"
-          onClick={props.onDismiss}
-          aria-label="Dismiss"
-          // 44px hit area per the binding tap-target rule; the negative margin
-          // keeps the optical size of the X close to the notice's edge.
-          className="-mr-2 -mt-2 flex h-11 w-11 shrink-0 items-center justify-center rounded-lg opacity-70 transition-colors hover:bg-white/[0.06] hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
-        >
+        // 44px hit area per the binding tap-target rule; the negative margin
+        // keeps the optical size of the X close to the notice's edge.
+        <IconButton label="Dismiss" onClick={props.onDismiss} className="-mr-2 -mt-2">
           <X size={14} aria-hidden />
-        </button>
+        </IconButton>
       )}
     </div>
   );
@@ -870,14 +892,9 @@ export function Dialog(props: {
               )}
             </div>
           </div>
-          <button
-            type="button"
-            aria-label="Close"
-            onClick={props.onClose}
-            className="-mr-2 flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
-          >
+          <IconButton label="Close" onClick={props.onClose} className="-mr-2">
             <X size={16} />
-          </button>
+          </IconButton>
         </div>
         {/* A contained body deliberately does not scroll: the panel is capped to
             the viewport, so the consumer owns the single scroll region. A nested

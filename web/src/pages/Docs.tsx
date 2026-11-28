@@ -2,13 +2,13 @@
 //
 // A reference manual, not a marketing page, so the composition is typographic
 // rather than decorative: a masthead that states the thesis as a wire strip
-// (five inbound surfaces → one canonical IR → thirteen provider types), a nav
+// (five inbound surfaces → one canonical IR → twelve provider types), a nav
 // that is a sticky vertical rail on desktop and a sticky horizontal chip bar
 // on narrow viewports, and eight numbered sections built from hairlines, mono
 // labels and real tables.
 //
 // Everything asserted here is read off the code — the endpoint list from
-// server/app.py, the retryable set from providers/base.py:RETRYABLE_STATUS, the
+// server/routers/, the retryable set from providers/base.py:RETRYABLE_STATUS, the
 // delta order from streaming/deltas.py, the provider types from
 // config.py:PROVIDER_TYPES. Change the code and this page has to follow.
 

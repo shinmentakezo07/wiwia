@@ -1,7 +1,7 @@
 // Proxy logs — internal gateway log stream with level filter chips (with
 // count badges), expandable message rows, and a live SSE tail (on by default).
 
-import { useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import { AlertTriangle, ChevronDown, ChevronRight, Inbox, Terminal } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getProxyLogs } from "@/api/client";
@@ -70,6 +70,12 @@ const HEAD = [
   { label: "Request ID", cls: COL.requestId },
 ];
 
+/** Rows the table renders, newest first. The ring cache still holds its full
+ *  ~500 so the level chips count every stored event, but re-rendering all of
+ *  them on each live prepend stalls the page — RequestLogs applies the same
+ *  250-row ceiling for the same reason. */
+const MAX_ROWS = 250;
+
 /** Identity for a proxy row that survives the live tail's prepend.
  *
  * `ts` is a float `time.time()` (microsecond resolution) so distinct events
@@ -135,6 +141,13 @@ export function ProxyLogsPage() {
     [all, level],
   );
 
+  // Cap the rendered rows (see MAX_ROWS). `filtered` stays complete so the
+  // chips and the footer's total keep counting every stored event.
+  const visible = useMemo(
+    () => (filtered.length > MAX_ROWS ? filtered.slice(0, MAX_ROWS) : filtered),
+    [filtered],
+  );
+
   // Count per level for the filter chip badges.
   const levelCounts = useMemo(() => {
     const counts: Record<Level, number> = { debug: 0, info: 0, warn: 0, error: 0 };
@@ -142,13 +155,18 @@ export function ProxyLogsPage() {
     return counts;
   }, [all]);
 
-  const toggleExpand = (key: string) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+  // Stable identity for the memoized rows below: pure functional setState,
+  // so the deps list is empty by construction.
+  const toggleExpand = useCallback(
+    (key: string) =>
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        return next;
+      }),
+    [],
+  );
 
   const chipCls = (lv: LevelFilter) =>
     `h-7 rounded-full border px-3 text-xs font-medium transition-colors inline-flex items-center gap-1.5 ${
@@ -213,7 +231,7 @@ export function ProxyLogsPage() {
             colClass={HEAD.map((h) => h.cls)}
             maxHeight={640}
           >
-            {filtered.map((l, i) => {
+            {visible.map((l, i) => {
               // Stable identity, NOT the array index. The live tail PREPENDS
               // (`[evt, ...old]`), which shifts every index by one, so an
               // index-bearing key invalidated every stored key on every new
@@ -231,7 +249,8 @@ export function ProxyLogsPage() {
                   isOpen={isOpen}
                   hasExtra={hasExtra}
                   nowMs={now}
-                  onToggle={() => toggleExpand(key)}
+                  rowKey={key}
+                  onToggle={toggleExpand}
                 />
               );
             })}
@@ -240,7 +259,7 @@ export function ProxyLogsPage() {
       )}
 
       <div className="mt-2 px-1 font-mono text-[11px] text-[var(--admin-text-dim)]">
-        <LogsFooter shown={filtered.length} total={all.length} />
+        <LogsFooter shown={visible.length} total={all.length} />
       </div>
     </div>
   );
@@ -250,21 +269,26 @@ export function ProxyLogsPage() {
 // ProxyRow — a single proxy log row with optional expandable detail.
 // ---------------------------------------------------------------------------
 
-function ProxyRow(props: {
+// memoized: the page re-renders on every poll and live prepend, and a row
+// whose props are all unchanged skips that work. That is why onToggle is a
+// stable useCallback taking the row key — an inline `() => toggleExpand(key)`
+// built per row in the map would defeat the memo.
+const ProxyRow = memo(function ProxyRow(props: {
   log: ProxyLogEntry;
   zebra: number;
   isOpen: boolean;
   hasExtra: boolean;
   nowMs: number;
-  onToggle: () => void;
+  rowKey: string;
+  onToggle: (key: string) => void;
 }) {
-  const { log: l, zebra, isOpen, hasExtra, nowMs, onToggle } = props;
+  const { log: l, zebra, isOpen, hasExtra, nowMs, rowKey, onToggle } = props;
   return (
     <>
       <LogRow
         zebra={zebra}
         ariaLabel={`proxy log ${l.level}`}
-        onClick={hasExtra ? onToggle : undefined}
+        onClick={hasExtra ? () => onToggle(rowKey) : undefined}
       >
         {/* Level accent rides the first cell so the row has exactly one cell
             per header (the accent used to be its own unlabelled column). */}
@@ -325,4 +349,4 @@ function ProxyRow(props: {
       )}
     </>
   );
-}
+});

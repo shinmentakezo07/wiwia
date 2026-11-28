@@ -3,16 +3,14 @@
 // Portal).
 //
 // Each provider keeps its own flow, because their OAuth shapes genuinely
-// differ: Cline needs a callback pasted back by hand, WorkBuddy hands back a
-// login URL and is polled, and Hermes uses RFC 8628 device authorization. The
-// tabs isolate those flows without duplicating any of them — the Cline pieces
-// live in `oauth-shared.tsx`/`oauth-routing.tsx`, WorkBuddy in
-// `workbuddy-shared.tsx`, and Hermes in `HermesOAuth.tsx`.
+// differ: Cline needs a callback pasted back by hand, and Hermes uses RFC
+// 8628 device authorization. The tabs isolate those flows without
+// duplicating any of them — the Cline pieces live in
+// `oauth-shared.tsx`/`oauth-routing.tsx`, and Hermes in `HermesOAuth.tsx`.
 //
 // Panels stay mounted while hidden so an in-progress sign-in survives a tab
-// switch: WorkBuddy and Hermes both poll a server-side session, and unmounting
-// the panel would abandon that loop mid-approval.
-
+// switch: Hermes polls a server-side session, and unmounting the panel
+// would abandon that loop mid-approval.
 import { useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";

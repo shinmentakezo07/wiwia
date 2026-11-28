@@ -44,7 +44,7 @@ const productsLinks: NavLink[] = [
   {
     title: "AI Gateway",
     href: "/products",
-    description: "Route every inbound dialect to thirteen provider types through one endpoint.",
+    description: "Route every inbound dialect to twelve provider types through one endpoint.",
     icon: Network,
     gradient: "hover:from-violet-500/20 hover:to-purple-600/30 group-hover/product:text-violet-400",
   },

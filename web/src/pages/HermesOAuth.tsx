@@ -6,8 +6,8 @@
 // a verification URL, the admin opens that URL in a browser and approves, and
 // wiwi polls the token endpoint. This page drives that loop: start → open
 // verification URL → poll until approved → connected. See wiwi/providers/
-// hermes_oauth.py for the verified endpoint contract and server/app.py for the
-// /admin/hermes/oauth/* routes.
+// hermes_oauth.py for the verified endpoint contract and
+// wiwi/server/routers/hermes_oauth.py for the /admin/hermes/oauth/* routes.
 
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";

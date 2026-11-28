@@ -45,7 +45,7 @@ const PLANS: Plan[] = [
     summary:
       "Run the gateway on your own machine or server. You pay your providers at their rates — wiwi adds no per-token fee.",
     features: [
-      "All 13 provider types and every inbound dialect",
+      "All 12 provider types and every inbound dialect",
       "Virtual keys, budgets, rate limits, and key pools",
       "Retries, cooldowns, fallbacks, and the optional health healer",
       "Request logs, usage analytics, Prometheus metrics, audit trail",

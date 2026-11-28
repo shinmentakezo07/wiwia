@@ -193,7 +193,7 @@ export function OpenSourcePage() {
               <span className="hero-gradient-text">WIWI Gateway</span>
             </h1>
             <p className="mx-auto mt-5 max-w-xl text-[15px] leading-relaxed text-[var(--admin-text-muted)] sm:text-base lg:mx-0">
-              Route every dialect to thirteen provider types through one API — and run the
+              Route every dialect to twelve provider types through one API — and run the
               entire platform on your own infrastructure. Open source, self-hostable, no lock-in.
             </p>
             <div className="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row lg:justify-start">

@@ -47,6 +47,7 @@ import {
   Drawer,
   EmptyState,
   ErrorText,
+  IconButton,
   PageHeader,
   ProgressBar,
   Select,
@@ -337,7 +338,7 @@ function WindowOverview(props: {
           cells, so the band reads as one instrument panel rather than six
           floating cards. */}
       <div className="grid gap-px bg-[var(--admin-border)] lg:grid-cols-[minmax(0,1fr)_248px]">
-        <div className="grid grid-cols-2 gap-px bg-[var(--admin-border)] sm:grid-cols-3 xl:grid-cols-6">
+        <div className="grid grid-cols-2 gap-px bg-[var(--admin-border)] sm:grid-cols-3 2xl:grid-cols-6">
           {tiles.map((t) => {
             const Icon = t.icon;
             return (
@@ -1259,14 +1260,9 @@ function LogDetail(props: { log: RequestLogEntry; onClose: () => void }) {
             {l.provider_key_label || "—"}
           </p>
         </div>
-        <button
-          type="button"
-          aria-label="Close"
-          onClick={props.onClose}
-          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)]"
-        >
+        <IconButton label="Close" onClick={props.onClose}>
           <X size={16} />
-        </button>
+        </IconButton>
       </header>
 
       {/* Scrollable body */}

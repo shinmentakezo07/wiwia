@@ -518,7 +518,7 @@ export function CrossAccountRoutingCard(props: {
 
         {/* Routing strategy is GLOBAL router state — PATCH /admin/model-groups/{name}
             ignores the path parameter and writes state.router.settings.routing_strategy
-            (wiwi/server/app.py:4672-4680). A switch styled as pool-local here would
+            (wiwi/server/routers/admin_models.py). A switch styled as pool-local here would
             silently re-route every model group in the gateway, so this is read-only
             and points at the page that owns the control. */}
         <div className="flex flex-col gap-2 border-t border-[var(--admin-border)] pt-4 sm:flex-row sm:items-center sm:justify-between">

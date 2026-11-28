@@ -1,4 +1,5 @@
-// Types mirroring the wiwi admin API payloads (see wiwi/server/app.py).
+// Types mirroring the wiwi admin API payloads (see wiwi/server/routers/ and
+// wiwi/server/schemas/).
 
 export interface PoolKey {
   label: string;

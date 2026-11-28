@@ -17,7 +17,7 @@ import { Link } from "react-router-dom";
 import { ArrowRight, ArrowUpDown, Boxes, Braces, Check, Copy, LayoutGrid, Rows3, Search, X } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { getPublicModels } from "@/api/client";
-import { aliasDisplayName, aliasTarget, type PublicModelGroup } from "@/api/types";
+import { aliasDisplayName, aliasTarget, type ModelAliasEntry, type PublicModelGroup } from "@/api/types";
 import { providerLogo } from "@/lib/provider-logos";
 import { Alert, EmptyState } from "@/components/ui";
 
@@ -52,7 +52,7 @@ interface AliasChip {
   dn: string | null;
 }
 
-function aliasChipsByGroup(aliases: Record<string, string>): Record<string, AliasChip[]> {
+function aliasChipsByGroup(aliases: Record<string, string | ModelAliasEntry>): Record<string, AliasChip[]> {
   const byGroup: Record<string, AliasChip[]> = {};
   for (const [alias, v] of Object.entries(aliases)) {
     (byGroup[aliasTarget(v)] ??= []).push({ alias, dn: aliasDisplayName(v) });

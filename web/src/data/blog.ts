@@ -31,7 +31,7 @@ export const BLOG_POSTS: BlogPost[] = [
     facts: [
       { label: "Pattern", value: "Hub-and-spoke translation" },
       { label: "wiwi inbound", value: "3 dialects" },
-      { label: "wiwi outbound", value: "13 provider types" },
+      { label: "wiwi outbound", value: "12 provider types" },
       { label: "Deployment", value: "Single Docker image or binary" },
     ],
     sections: [
@@ -284,7 +284,7 @@ docker compose up --build                    # + Postgres, health-gated
         ],
         code: {
           label: "bash",
-          code: `python3 bench.py -n 40 -c 1,4,16 --max-tokens 2000
+          code: `python3 scripts/bench.py -n 40 -c 1,4,16 --max-tokens 2000
 # → TTFT, p50/p95, output TPS per model, per concurrency`,
         },
       },

@@ -43,7 +43,7 @@ import {
 import { ApiError, getModels, getPlaygroundMetrics } from "@/api/client";
 import type { ModelGroup, PlaygroundMetrics } from "@/api/types";
 import { Link } from "react-router-dom";
-import { Button, Drawer, Spinner } from "@/components/ui";
+import { Button, Drawer, IconButton, Spinner } from "@/components/ui";
 import { Markdown } from "@/components/Markdown";
 import { HERO_BEAMS_COMPACT, HeroBeamBackdrop } from "@/components/HeroBeamBackdrop";
 import {
@@ -733,14 +733,13 @@ function ChatSidebar(props: {
               className="w-full bg-transparent text-[12px] text-[var(--admin-text)] outline-none placeholder:text-[var(--admin-text-dim)]"
             />
             {query && (
-              <button
-                type="button"
+              <IconButton
+                label="Clear search"
                 onClick={() => setQuery("")}
-                className="-m-2.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
-                aria-label="Clear search"
+                className="-m-2.5"
               >
                 <X size={12} />
-              </button>
+              </IconButton>
             )}
           </div>
         </div>
@@ -811,28 +810,25 @@ function ChatSidebar(props: {
                             (AUDIT #210). Actions are siblings of the selection
                             button so interactive controls are never nested. */}
                         <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100">
-                          <button
-                            type="button"
+                          <IconButton
+                            label={`Rename ${c.title || "chat"}`}
+                            title="Rename chat"
                             onClick={() => {
                               renameCommitRef.current = null;
                               setRenamingId(c.id);
                               setRenameDraft(c.title || "");
                             }}
-                            className="flex h-11 w-11 items-center justify-center rounded text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
-                            aria-label={`Rename ${c.title || "chat"}`}
-                            title="Rename chat"
                           >
                             <Pencil size={12} />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onDelete(c.id)}
-                            className="flex h-11 w-11 items-center justify-center rounded text-[var(--admin-text-dim)] transition-colors hover:bg-red-500/10 hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
-                            aria-label={`Delete ${c.title || "chat"}`}
+                          </IconButton>
+                          <IconButton
+                            tone="danger"
+                            label={`Delete ${c.title || "chat"}`}
                             title="Delete chat"
+                            onClick={() => onDelete(c.id)}
                           >
                             <Trash2 size={13} />
-                          </button>
+                          </IconButton>
                         </div>
                       </div>
                     ),
@@ -881,14 +877,12 @@ function ChatSidebar(props: {
                 >
                   Confirm
                 </button>
-                <button
-                  type="button"
+                <IconButton
+                  label="Cancel clear all"
                   onClick={() => setConfirmingClear(false)}
-                  className="flex h-11 w-11 items-center justify-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/50"
-                  aria-label="Cancel clear all"
                 >
                   <X size={12} />
-                </button>
+                </IconButton>
               </div>
             )}
           </div>
@@ -1607,14 +1601,14 @@ export function PlaygroundPage() {
                     Retry
                   </button>
                 )}
-                <button
-                  type="button"
+                <IconButton
+                  tone="danger"
+                  label="Dismiss error"
                   onClick={() => setErr(null)}
-                  className="-m-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-red-400/60 transition-colors hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
-                  aria-label="Dismiss error"
+                  className="-m-1"
                 >
                   <X size={13} />
-                </button>
+                </IconButton>
               </div>
             </div>
           )}

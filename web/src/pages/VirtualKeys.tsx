@@ -393,6 +393,11 @@ function KeyRow(props: {
                 )}
               </>
             )}
+            {k.priority && (
+              <Badge tone="violet" title="Priority lane">
+                {k.priority}
+              </Badge>
+            )}
           </div>
         </div>
 
@@ -694,7 +699,7 @@ function Segmented<T extends string>(props: {
 
 /** One dialog for both create and edit. Mounted only while open, so its state is
  *  seeded fresh from `target` every time and needs no reset logic. */
-function KeyDialog(props: { target: VirtualKey | "new"; onClose: () => void }) {
+function KeyDialog(props: { target: VirtualKey | "new"; lanes: string[]; onClose: () => void }) {
   const qc = useQueryClient();
   const edit = props.target === "new" ? null : props.target;
 
@@ -709,6 +714,9 @@ function KeyDialog(props: { target: VirtualKey | "new"; onClose: () => void }) {
   // Expiry select: "" = never (create) / keep current (edit); "never" = remove (edit only).
   const [expiry, setExpiry] = useState("");
   const [hours, setHours] = useState("");
+  // Lane select: "" = the gateway's default lane; only offered when the
+  // operator configured priority lanes at all.
+  const [priority, setPriority] = useState(edit?.priority ?? "");
   const [clr, setClr] = useState({ budget: false, rpm: false, tpm: false, models: false });
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<{ key: string; name: string } | null>(null);
@@ -766,6 +774,7 @@ function KeyDialog(props: { target: VirtualKey | "new"; onClose: () => void }) {
         rpm: rpmN ?? undefined,
         tpm: tpmN ?? undefined,
         ttl_seconds: hoursN != null ? Math.round(hoursN * 3600) : undefined,
+        priority: priority || undefined,
       });
       return;
     }
@@ -780,6 +789,7 @@ function KeyDialog(props: { target: VirtualKey | "new"; onClose: () => void }) {
     else if (list.length > 0 && list.join(",") !== edit.models.join(",")) patch.models = list;
     if (expiry === "never") patch.expires_at = null;
     else if (hoursN != null) patch.expires_at = Math.round(Date.now() / 1000 + hoursN * 3600);
+    if (priority !== (edit.priority ?? "")) patch.priority = priority || null;
     save.mutate({ id: edit.id, patch });
   }
 
@@ -977,6 +987,16 @@ function KeyDialog(props: { target: VirtualKey | "new"; onClose: () => void }) {
                 {isBad(hoursN) && <FieldError>Not a number</FieldError>}
               </div>
             )}
+            {props.lanes.length > 0 && (
+              <Field label="Priority lane" hint="Reserved router concurrency; (default) shares the common lane.">
+                <Select
+                  value={priority}
+                  onChange={setPriority}
+                  options={[{ value: "", label: "(default)" }, ...props.lanes.map((l) => ({ value: l, label: l }))]}
+                  className="w-full"
+                />
+              </Field>
+            )}
           </div>
           <div>
             <div className="mb-1.5 flex items-center justify-between gap-2">
@@ -1025,6 +1045,9 @@ export function VirtualKeysPage() {
   const [dialog, setDialog] = useState<VirtualKey | "new" | null>(null);
 
   const all = query.data?.keys ?? [];
+  // Lane names ride the same response; empty when none are configured, in
+  // which case the dialog's lane select is not offered at all.
+  const lanes = query.data?.priority_lanes ?? [];
   const needle = search.trim().toLowerCase();
   const searched = needle
     ? all.filter((k) => k.alias.toLowerCase().includes(needle) || k.models.some((m) => m.toLowerCase().includes(needle)))
@@ -1146,7 +1169,7 @@ export function VirtualKeysPage() {
       </Card>
 
       {dialog != null && (
-        <KeyDialog key={dialog === "new" ? "new" : dialog.id} target={dialog} onClose={() => setDialog(null)} />
+        <KeyDialog key={dialog === "new" ? "new" : dialog.id} target={dialog} lanes={lanes} onClose={() => setDialog(null)} />
       )}
     </div>
   );

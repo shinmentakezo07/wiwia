@@ -179,7 +179,7 @@ export const getBuiltinProviders = () =>
 export const patchProviderKey = (
   provider: string,
   label: string,
-  patch: { enabled?: boolean; weight?: number; secret?: string },
+  patch: { enabled?: boolean; weight?: number; secret?: string; reset_status?: boolean },
 ) =>
   api<{ key: PoolKey }>(`/admin/providers/${encodeURIComponent(provider)}/keys/${encodeURIComponent(label)}`, {
     method: "PATCH",
@@ -314,7 +314,8 @@ export const deleteDeployment = (group: string, provider: string, modelId: strin
     { method: "DELETE" },
   );
 
-export const listKeys = () => api<{ keys: VirtualKey[] }>("/admin/keys");
+export const listKeys = () =>
+  api<{ keys: VirtualKey[]; priority_lanes?: string[] }>("/admin/keys");
 
 export const generateKey = (body: {
   name: string;
@@ -324,6 +325,7 @@ export const generateKey = (body: {
   rpm?: number | null;
   tpm?: number | null;
   ttl_seconds?: number | null;
+  priority?: string;
 }) =>
   api<{ key: string; id: string; note: string }>("/admin/keys/generate", {
     method: "POST",
@@ -338,6 +340,7 @@ export const patchKey = (
     tpm?: number | null;
     models?: string[];
     expires_at?: number | null;
+    priority?: string | null;
   },
 ) =>
   api<{ key: VirtualKey }>(`/admin/keys/${encodeURIComponent(id)}`, {
@@ -539,7 +542,7 @@ export const patchUser = (
   });
 
 export const getPublicModels = () =>
-  api<{ groups: PublicModelGroup[]; aliases: Record<string, string> }>(
+  api<{ groups: PublicModelGroup[]; aliases: Record<string, string | ModelAliasEntry> }>(
     "/public/models",
   );
 // -- Cline OAuth --------------------------------------------------------------
@@ -600,7 +603,7 @@ export const hermesStatus = (provider: string) =>
   );
 // ``key_label`` targets one account in the pool; omitting it makes the server
 // pick the first managed account (refresh) or remove every managed account
-// (disconnect) — see wiwi/server/app.py's /admin/hermes/oauth/{refresh,disconnect}.
+// (disconnect) — see wiwi/server/routers/hermes_oauth.py's /admin/hermes/oauth/{refresh,disconnect}.
 export const hermesRefresh = (provider: string, keyLabel?: string) =>
   api<HermesRefreshResponse>("/admin/hermes/oauth/refresh", {
     method: "POST",

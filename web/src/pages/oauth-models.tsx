@@ -4,7 +4,7 @@
 //
 // Each shared model becomes a normal model group named `<prefix>:<model_id>`
 // (the same convention the Cline default-model reconciler already uses), with
-// one deployment per account of that type. Requests to `hermes:<id>` or
+// one deployment per account of that type. Requests to `cline:<id>` or
 // `hermes:<id>` therefore smooth-WRR across all of those accounts. Deployments
 // belonging to other provider types are never touched.
 

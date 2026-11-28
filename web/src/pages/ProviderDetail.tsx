@@ -5,7 +5,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Boxes, CheckCircle2, ChevronDown, ChevronUp, Cloud, Cpu, Eye, EyeOff, Globe, KeyRound, Layers, Link2, Loader2, LogIn, Plus, RefreshCw, Search, Server, Settings, Sparkles, Sunrise, Trash2, Unlink, X, Zap } from "lucide-react";
+import { ArrowLeft, Boxes, CheckCircle2, ChevronDown, ChevronUp, Cloud, Cpu, Eye, EyeOff, Globe, KeyRound, Layers, Link2, Loader2, LogIn, Plus, RefreshCw, RotateCcw, Search, Server, Settings, Sparkles, Sunrise, Trash2, Unlink, X, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
   addDeployment,
@@ -48,6 +48,7 @@ import {
   Dialog,
   EmptyState,
   ErrorText,
+  IconButton,
   PageHeader,
   Field,
   Input,
@@ -135,7 +136,7 @@ function KeyRow(props: { provider: string; k: PoolKey; models: string[]; onError
   };
 
   const patch = useMutation({
-    mutationFn: (p: { enabled?: boolean; weight?: number }) =>
+    mutationFn: (p: { enabled?: boolean; weight?: number; reset_status?: boolean }) =>
       patchProviderKey(props.provider, props.k.label, p),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["providers"] }),
     onError: (e) => props.onError(e.message),
@@ -231,26 +232,23 @@ function KeyRow(props: { provider: string; k: PoolKey; models: string[]; onError
                 : "no secret"}
             </span>
             {props.k.has_secret && (
-              <button
-                type="button"
+              <IconButton
+                label={revealed ? "Hide key" : "Reveal key"}
                 onClick={toggleReveal}
                 disabled={reveal.isPending}
-                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 sm:h-8 sm:w-8 disabled:opacity-50"
-                title={revealed ? "Hide key" : "Reveal key"}
-                aria-label={revealed ? "Hide key" : "Reveal key"}
+                className="shrink-0 disabled:opacity-50 sm:h-8 sm:w-8"
               >
                 {reveal.isPending ? <Loader2 size={12} className="animate-spin" /> : revealed ? <EyeOff size={12} /> : <Eye size={12} />}
-              </button>
+              </IconButton>
             )}
-            <button
-              type="button"
-              onClick={() => setEditingSecret(true)}
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 sm:h-8 sm:w-8"
+            <IconButton
+              label={props.k.has_secret ? "Replace key" : "Set key"}
               title={props.k.has_secret ? "Replace key" : "Set key — this key has no credential and is disabled"}
-              aria-label={props.k.has_secret ? "Replace key" : "Set key"}
+              onClick={() => setEditingSecret(true)}
+              className="shrink-0 sm:h-8 sm:w-8"
             >
               <KeyRound size={12} />
-            </button>
+            </IconButton>
           </div>
         )}
       </TD>
@@ -297,6 +295,17 @@ function KeyRow(props: { provider: string; k: PoolKey; models: string[]; onError
                 onClick={() => patch.mutate({ enabled: !props.k.enabled })}>
           {props.k.enabled ? "Disable" : "Enable"}
         </Button>
+        {(props.k.status === "cooling" || props.k.status === "invalid") && (
+          <IconButton
+            label="Reset"
+            title="Put this key back in rotation: clears the cooldown or retirement and the fail streak"
+            disabled={patch.isPending}
+            onClick={() => patch.mutate({ reset_status: true })}
+            className="sm:h-8 sm:w-8"
+          >
+            <RotateCcw size={14} />
+          </IconButton>
+        )}
         <Button
           variant="outline"
           disabled={!props.k.has_secret}
@@ -476,15 +485,14 @@ function AddKeysCard(props: { provider: string; existing: number; onError: (m: s
                 every width so the mobile layout has no orphaned dead cell. */}
             <div className="mb-2 flex h-8 items-center justify-between sm:h-7">
               <span className="admin-label">Key {props.existing + i + 1}</span>
-              <button
-                type="button"
-                aria-label={`Remove key row ${i + 1}`}
+              <IconButton
+                label={`Remove key row ${i + 1}`}
                 disabled={rows.length === 1}
                 onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}
-                className="flex h-11 w-11 items-center justify-center rounded-md text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50 disabled:invisible sm:h-10 sm:w-10"
+                className="disabled:invisible sm:h-10 sm:w-10"
               >
                 <X size={14} />
-              </button>
+              </IconButton>
             </div>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_5rem_minmax(0,2fr)] sm:items-center sm:gap-3">
               <div className="min-w-0">
