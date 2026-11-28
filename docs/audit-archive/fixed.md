@@ -1439,11 +1439,12 @@ deployment::
     add another provider to this group","type":"invalid_request_error"}}
 
 Two independent defects, either of which alone produces that failure. 17
-regressions in `tests/test_fix_round160.py`.
+regressions were in `tests/test_fix_round160.py` (file removed with the
+WorkBuddy provider in commit e97ce21).
 
 ### 487. The fingerprint rewrite covered one sentence out of seven, and the 400 it caused was terminal
 
-**Severity:** 🟠 High (the provider is unusable from the two clients it is most likely to be bought for, and the gateway had no way to route around it) · **Status: fixed** — round 160 (`tests/test_fix_round160.py`)
+**Severity:** 🟠 High (the provider is unusable from the two clients it is most likely to be bought for, and the gateway had no way to route around it) · **Status: fixed** — round 160 (tests removed with the provider in commit e97ce21)
 **Files:** `wiwi/providers/workbuddy_adapter.py` (`_SANITIZE_FEATURES` :53, `_IDENTITY_REWRITES` :84, `_sanitize_text` :110 — pre-fix the rewrite was one `_REWRITES` entry and the gate listed four literals), `wiwi/providers/base.py` (`_CHANNEL_REFUSAL_MARKERS` :242, the 400 branch :339 in `_classify_provider_status`)
 
 `_sanitize_text` exists to break the *verbatim template match* the upstream
@@ -1508,12 +1509,13 @@ login URL. The `workbuddy` provider had no browser-login flow at all, so the onl
 way to create an account was `/import` with a `workbuddy2api`-style `auths/` JSON
 that the operator had to obtain from a *different* client, on another machine.
 `cline` (`build_auth_url`) and `hermes` (`request_device_code`) both ship a login
-flow; WorkBuddy was the one OAuth-ish provider that did not. 20 regressions in
-`tests/test_fix_round159.py`.
+flow; WorkBuddy was the one OAuth-ish provider that did not. 20 regressions
+were in `tests/test_fix_round159.py` (file removed with the provider in
+commit e97ce21).
 
 ### 485. The `workbuddy` provider shipped no browser-login flow, so `authUrl` had nowhere to come from
 
-**Severity:** 🟠 High (a fresh operator cannot connect the provider from wiwi at all — the credential must be harvested out-of-band first) · **Status: fixed** — round 159 (`tests/test_fix_round159.py`)
+**Severity:** 🟠 High (a fresh operator cannot connect the provider from wiwi at all — the credential must be harvested out-of-band first) · **Status: fixed** — round 159 (tests removed with the provider in commit e97ce21)
 **Files:** `wiwi/providers/workbuddy_auth.py` (`accepted_auth_url` :372, `start_login` :425, `poll_login` :508), `wiwi/server/app.py` (`/admin/workbuddy/login/start` :6921, `/admin/workbuddy/login/poll` :6975), `web/src/api/client.ts` (`workbuddyLoginStart` :621, `workbuddyLoginPoll` :628), `web/src/api/types.ts` (login types :440), `web/src/pages/WorkBuddyAccounts.tsx` (`LoginDialog` :206)
 
 `workbuddy_auth.py` could already *refresh* a WorkBuddy credential and could
@@ -5478,7 +5480,8 @@ All new round-42 tests were verified to fail against the pre-fix source.
 ## ✅ Fixed — round 44
 
 The round-44 findings below were implemented and verified green (`1556 passed`,
-`ruff` clean). Each fix has a regression test in `tests/test_fix_round44.py`.
+`ruff` clean). Each fix had a regression test in `tests/test_fix_round44.py`;
+the file was removed with the WorkBuddy provider in commit e97ce21.
 
 | # | Fix | File(s) | Test |
 |---|---|---|---|
@@ -6731,7 +6734,10 @@ function names are the stable anchor. Entries #443-#459.
 inline `**Status: fixed**` line naming its round test file — #443/#444/#446/#447/
 #448/#449/#450/#451 in `tests/test_fix_round143.py` (with #450/#451 extended by
 `tests/test_fix_round144.py`), #445/#452/#453 in `tests/test_fix_round144.py`, and
-#454-#459 in `tests/test_fix_round142.py`. Two are fixed only in part — #458's
+#454-#459 in `tests/test_fix_round142.py`. The `test_fix_round144.py` file was
+removed with the WorkBuddy provider in commit e97ce21, so only the Cline halves'
+regressions (in the surviving `tests/test_fix_round143.py`) remain in the tree.
+Two are fixed only in part — #458's
 config-section half is still open as #460, and #456's honest fix left per-deployment
 limits YAML-owned, still open as #461. Full gate green at the time of writing:
 3218 passed, 11 skipped, ruff clean.
@@ -6840,7 +6846,7 @@ delete the `if result.get(...)` guard on both the sweeper and admin paths.
 
 ### 445. A WorkBuddy refresh response with no `expiresIn` is the same storm — and the docstring documents the opposite behaviour
 
-**Severity:** 🔴 Critical · **Status: fixed** — round 144 (`tests/test_fix_round144.py`; fixed 2026-10-14)
+**Severity:** 🔴 Critical · **Status: fixed** — round 144 (`tests/test_fix_round144.py`, removed with the WorkBuddy provider in commit e97ce21; fixed 2026-10-14)
 
 `workbuddy_auth.refresh_token` resolves the field through
 `wiwi/providers/token_expiry.compute_expires_at`, and the docstring
@@ -7049,7 +7055,7 @@ is a legitimate result rather than a failure.
 
 ### 450. `mark_dead` is permanent and keyed on `(provider, label)` — a re-created account inherits the corpse
 
-**Severity:** 🟠 High · **Status: fixed** — rounds 143 + 144 (`tests/test_fix_round143.py`, `tests/test_fix_round144.py`; fixed 2026-10-14)
+**Severity:** 🟠 High · **Status: fixed** — rounds 143 + 144 (`tests/test_fix_round143.py`; the round-144 file was removed with the WorkBuddy provider in commit e97ce21; fixed 2026-10-14)
 
 Installing a new credential now clears the identity's breaker entry,
 so a dead circuit means "*this* grant is unusable", not "this
@@ -7091,7 +7097,7 @@ credential that earned it.
 
 ### 451. Per-provider OAuth state is never purged on disconnect or provider delete (Cline and WorkBuddy)
 
-**Severity:** 🟠 High · **Status: fixed** — rounds 143 + 144 (`tests/test_fix_round143.py`, `tests/test_fix_round144.py`; fixed 2026-10-14)
+**Severity:** 🟠 High · **Status: fixed** — rounds 143 + 144 (`tests/test_fix_round143.py`; the round-144 file was removed with the WorkBuddy provider in commit e97ce21; fixed 2026-10-14)
 
 `forget(provider)` / `forget(provider, label)` on both workers pops
 the lock, the generation counter and the breaker entries, called from
@@ -7130,7 +7136,7 @@ has the `forget` shape in `hermes_auto_refresh.py` — port it.
 
 ### 452. `workbuddy_import` mutated the router BEFORE persisting, with no exception guard — half-imported account and a bare 500
 
-**Severity:** 🟠 High · **Status: fixed** — round 144 (`tests/test_fix_round144.py`; fixed 2026-10-14)
+**Severity:** 🟠 High · **Status: fixed** — round 144 (`tests/test_fix_round144.py`, removed with the WorkBuddy provider in commit e97ce21; fixed 2026-10-14)
 
 `workbuddy_import` persists first and mutates the in-memory pool only
 after every `add_key` lands, rolling the DB back on failure — so a
@@ -7171,7 +7177,7 @@ message), and only then append to `existing.keys`. Log the audit row in a
 
 ### 453. `workbuddy_import` did not dedupe labels WITHIN one import batch
 
-**Severity:** 🟠 High · **Status: fixed** — round 144 (`tests/test_fix_round144.py`; fixed 2026-10-14)
+**Severity:** 🟠 High · **Status: fixed** — round 144 (`tests/test_fix_round144.py`, removed with the WorkBuddy provider in commit e97ce21; fixed 2026-10-14)
 
 `taken` is updated as each label is accepted inside the loop, so a
 second entry with the same `nickname` in one batch trips the same
