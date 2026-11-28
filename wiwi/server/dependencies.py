@@ -34,9 +34,11 @@ Two rules the callers must not break:
 from __future__ import annotations
 
 import hmac
-from typing import Annotated
+from typing import Annotated, Any
 
+import orjson
 from fastapi import Depends, Request
+from fastapi.responses import JSONResponse
 
 from wiwi.auth.users import UserInfo, verify_session
 from wiwi.server.errors import APIError
@@ -162,3 +164,86 @@ async def require_admin(request: Request) -> UserInfo:
 #: definition of "what an authenticated caller looks like in a signature".
 CurrentUser = Annotated[UserInfo, Depends(require_user)]
 AdminUser = Annotated[UserInfo, Depends(require_admin)]
+
+# -- shared request/response plumbing ------------------------------------------
+#
+# Moved out of ``server/app.py`` (round 206) so the extracted router modules
+# import one definition instead of the app module: importing ``app.py`` from
+# a library module is forbidden (lifespan side effects), and a private copy
+# would let the two drift.
+
+class ORJSONResponse(JSONResponse):
+    """orjson-serialized JSON response.
+
+    FastAPI's built-in ``ORJSONResponse`` was deprecated in 0.141 (it now
+    serializes via Pydantic when a response_model is set). We return raw dicts
+    from most admin endpoints, so we keep orjson (faster, handles datetimes)
+    via this trivial subclass instead of the deprecated shim.
+    """
+
+    def render(self, content: Any) -> bytes:
+        return orjson.dumps(content, option=orjson.OPT_NON_STR_KEYS)
+
+
+def peer_is_trusted(peer: str, trusted_proxies: list[str]) -> bool:
+    """True when *peer* falls inside any trusted-proxy CIDR / address."""
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    for entry in trusted_proxies:
+        try:
+            if addr in ipaddress.ip_network(entry, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def client_ip(request: Request, trusted_proxies: list[str] | None = None) -> str:
+    """Best-effort client IP for throttling.
+
+    ``X-Forwarded-For`` is trusted only when the direct peer is in
+    *trusted_proxies* (CIDRs from ``general_settings.trusted_proxies``). By
+    default the peer address is used, because an unconditionally-trusted XFF
+    lets an attacker mint a fresh throttle bucket per request simply by
+    rotating the header — which defeated the signup cap and the login
+    brute-force limit (AUDIT #73). XFF is never used for authn or URL building.
+    """
+    peer = request.client.host if request.client else "unknown"
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd and trusted_proxies and peer_is_trusted(peer, trusted_proxies):
+        # Left-most entry is the original client under a well-behaved chain of
+        # trusted proxies.
+        first = fwd.split(",")[0].strip()
+        if first:
+            return first
+    return peer
+
+
+def request_is_https(request: Request,
+                     trusted_proxies: list[str] | None = None) -> bool:
+    """True when the caller reached wiwi over https.
+
+    The ASGI scheme alone misses TLS that terminated at an *external* proxy:
+    uvicorn only maps ``X-Forwarded-Proto`` into ``request.url.scheme`` for
+    ``forwarded_allow_ips`` (loopback by default), so behind an external TLS
+    terminator the scheme is http and a scheme-derived ``Secure`` cookie flag
+    was silently dropped. The header is believed only when the direct peer is
+    in *trusted_proxies* — the same gate ``client_ip`` applies to
+    ``X-Forwarded-For`` (AUDIT #73) — so header injection from an untrusted
+    peer cannot mint a Secure (or, worse, hide a real downgraded) context.
+    """
+    if request.url.scheme == "https":
+        return True
+    fwd = request.headers.get("x-forwarded-proto", "")
+    if not fwd or not trusted_proxies:
+        return False
+    peer = request.client.host if request.client else ""
+    if not peer_is_trusted(peer, trusted_proxies):
+        return False
+    # Left-most entry is the original scheme under a well-behaved chain of
+    # trusted proxies (mirrors client_ip's reading of X-Forwarded-For).
+    first = fwd.split(",")[0].strip().lower()
+    return first == "https"
