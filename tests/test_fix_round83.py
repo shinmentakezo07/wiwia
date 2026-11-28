@@ -300,8 +300,22 @@ def test_valid_prometheus_path_loads(good):
     assert cfg.router_settings.prometheus_path == good
 
     app = create_app(cfg)
-    assert any(getattr(r, "path", None) == good for r in app.routes), (
-        f"no route registered at {good!r}")
+    # Included routers are materialized lazily, so a flat scan of
+    # ``app.routes`` sees ``path=None``; recurse the same way the AGENTS.md
+    # parity snippet counts routes.
+    seen: list[str] = []
+
+    def _paths(routes):
+        for r in routes:
+            p = getattr(r, "path", None)
+            if p:
+                seen.append(p)
+            inner = getattr(r, "original_router", None)
+            if inner is not None:
+                _paths(inner.routes)
+
+    _paths(app.routes)
+    assert good in seen, f"no route registered at {good!r}"
 
 
 def test_invalid_prometheus_path_rejected_from_a_file(tmp_path):

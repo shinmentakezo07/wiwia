@@ -337,7 +337,7 @@ async def test_the_route_reaches_the_relay_and_upstream(upstream):
             seen.append(url)
             yield real
 
-    with (patch("wiwi.server.app.websockets.connect", fake_connect),
+    with (patch("wiwi.server.routers.realtime.websockets.connect", fake_connect),
           TestClient(app) as client,
           client.websocket_connect(
               "/v1/realtime?model=m",

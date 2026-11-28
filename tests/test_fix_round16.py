@@ -182,7 +182,9 @@ class TestAdminPlaygroundKeyCap:
                 assert mr.status_code == 200, mr.text
                 assert mr.json()["key"].startswith("sk-wiwi-")
 
-            from wiwi.server.app import _MAX_PLAYGROUND_KEYS_PER_USER
+            from wiwi.server.services.playground import (
+                MAX_PLAYGROUND_KEYS_PER_USER as _MAX_PLAYGROUND_KEYS_PER_USER,
+            )
             live = await app.state.wiwi.auth.count_keys(
                 owner_id=None, alias="playground")
             assert live <= _MAX_PLAYGROUND_KEYS_PER_USER, (

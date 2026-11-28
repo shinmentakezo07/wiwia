@@ -204,7 +204,9 @@ async def test_wrapper_reuses_a_cached_live_key_and_self_heals_a_dead_one(tmp_pa
     state = app.state.wiwi
     r = await client.get("/auth/me")
     user_id = r.json()["user"]["id"]
-    from wiwi.server.app import _MAX_PLAYGROUND_KEYS_PER_USER  # noqa: F401 — cap contract
+    from wiwi.server.services.playground import (  # noqa: F401 — cap contract
+        MAX_PLAYGROUND_KEYS_PER_USER as _MAX_PLAYGROUND_KEYS_PER_USER,
+    )
 
     respx.post("https://api.openai.com/v1/chat/completions").respond(json=OPENAI_BODY)
 

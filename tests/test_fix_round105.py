@@ -38,7 +38,8 @@ from wiwi.config import (
     ProviderDef,
     WiwiConfig,
 )
-from wiwi.server.app import _key_owner_id, _PgBearerCache, create_app
+from wiwi.server.app import _PgBearerCache, create_app
+from wiwi.server.dependencies import key_owner_id as _key_owner_id
 
 MASTER = "sk-wiwi-master-test"
 

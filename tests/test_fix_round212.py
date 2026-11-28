@@ -26,7 +26,10 @@ from wiwi.config import (
     ProviderDef,
     WiwiConfig,
 )
-from wiwi.server.app import _MAX_PLAYGROUND_KEYS_PER_USER, create_app
+from wiwi.server.app import create_app
+from wiwi.server.services.playground import (
+    MAX_PLAYGROUND_KEYS_PER_USER as _MAX_PLAYGROUND_KEYS_PER_USER,
+)
 
 MASTER = "sk-wiwi-master-test"
 
