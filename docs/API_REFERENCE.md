@@ -82,7 +82,7 @@ OpenAI-style model list of the model groups visible to the authenticated key.
 | `x-wiwi-request-id` | Request ID, echoed as a response header on every reply |
 | `x-wiwi-cache` | `HIT` **only** when the reply was served from the gateway's exact-match response cache (see `docs/CONFIG.md` § `cache_settings`). Absent on a miss. A hit still carries its own `x-wiwi-request-id`, and the body's `id` / `created` describe the request being answered, not the one that populated the entry |
 | `x-wiwi-singleflight` | `JOINED` **only** when this non-streaming request was served from another in-flight request's upstream call (`wiwi_settings.singleflight_enabled: true`). The joiner is logged with the shared usage and `cost=0`; the leader pays. Absent on the leader and when dedupe is off. |
-| `x-wiwi-timings` | Per-stage milliseconds (`decode`, `auth`, `admit`, `dispatch`, `upstream`, `encode`) when `wiwi_settings.perf_timings: true`. Semicolon-separated; intended for `bench.py`, not for clients. Streaming responses carry only the first four stages (the body is not encoded yet). Absent by default. |
+| `x-wiwi-timings` | Per-stage milliseconds (`decode`, `auth`, `admit`, `dispatch`, `upstream`, `encode`) when `wiwi_settings.perf_timings: true`. Semicolon-separated; intended for `scripts/bench.py`, not for clients. Streaming responses carry only the first four stages (the body is not encoded yet). Absent by default. |
 | `x-wiwi-trace-id` | Trace ID (32 hex), only when `telemetry.enabled`. Pair it with the collector to pull the exact trace; see `docs/CONFIG.md` § `telemetry` |
 | `x-wiwi-stream-id` | Stream journal ID — pass back on reconnect to replay |
 | `x-wiwi-translation-warnings` | Present **only** when the request asked for something the chosen provider could not honour — a provider-hosted tool the backend cannot run, a sampling parameter it has no field for, a dropped attachment, an unsigned thinking block. The messages are `;`-separated. The same list is always in the request log (`translation_warnings`). Absent when nothing was dropped. |
@@ -151,9 +151,9 @@ request-log row is written per session.
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/admin/keys` | GET | List virtual keys (hashed at rest; never returns plaintext). |
+| `/admin/keys` | GET | List virtual keys (hashed at rest; never returns plaintext). The body also carries `priority_lanes` (the configured lane names, `[]` when none) so a console can offer them in the key dialogs. |
 | `/admin/keys/generate` | POST | Mint a key. Body: name, models, budget, rpm/tpm, expiry, `priority` (lane name). **Plaintext `sk-wiwi-…` returned only here.** |
-| `/admin/keys/{key_id}` | PATCH | Update name/models/budget/limits/lane. `priority` is operator-only: a key's owner cannot change their own lane. |
+| `/admin/keys/{key_id}` | PATCH | Update models/budget/limits/expiry/TTL/lane (no rename). `priority` is operator-only: a key's owner cannot change their own lane. |
 | `/admin/keys/{key_id}` | DELETE | Revoke a key. |
 | `/admin/keys/{key_id}/disable` | POST | Disable without deleting. |
 
@@ -161,7 +161,7 @@ request-log row is written per session.
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/admin/provider-catalog` | GET | Catalog of the 13 provider types (from `PROVIDER_TYPES`) with required fields. |
+| `/admin/provider-catalog` | GET | Catalog of the 12 provider types (from `PROVIDER_TYPES`) with required fields. |
 | `/admin/providers` | GET | List configured providers + key pools + health states. |
 | `/admin/providers` | POST | Add a provider account. |
 | `/admin/providers/{name}` | PATCH | Edit provider (name/type/base_url/timeout). |
@@ -229,7 +229,7 @@ Four things a backup deliberately does not do:
   removed is removed here too, but nothing is ever dropped merely for being
   absent from the file.
 
-### OAuth providers (Cline, WorkBuddy)
+### OAuth providers (Cline)
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -256,11 +256,6 @@ Hermes uses OAuth 2.0 device authorization (RFC 8628). Unlike Cline's paste-code
 | `/admin/hermes/oauth/refresh` | POST | Force a token refresh (`{"provider": …, "key_label"?: …}`). `key_label` targets one account (default: the first managed one). `401` on a terminal grant (`invalid_grant`/reused refresh token) — that account needs re-login; others keep serving. |
 | `/admin/hermes/oauth/disconnect` | DELETE | Remove accounts (`{"provider": …, "key_label"?: …}`). With `key_label` removes just that account; without it, removes every managed account. Returns `{disconnected: <count>}`. |
 
-| `/admin/workbuddy/accounts` | GET | List connected WorkBuddy accounts. |
-| `/admin/workbuddy/import` | POST | Import WorkBuddy account credentials. |
-| `/admin/workbuddy/export` | GET | Export account data. |
-| `/admin/workbuddy/refresh` | POST | Force token refresh. |
-
 ### Model groups, deployments, aliases
 
 | Endpoint | Method | Description |
@@ -284,9 +279,9 @@ Hermes uses OAuth 2.0 device authorization (RFC 8628). Unlike Cline's paste-code
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/admin/logs/requests` | GET | Request logs (paginated; supports key/model/status/time filters). |
+| `/admin/logs/requests` | GET | Request logs (paginated; `limit`/`minutes`/`offset` — the console filters client-side). |
 | `/admin/logs/proxy` | GET | Proxy stream log (upstream request/response metadata). |
-| `/admin/stats/overview` | GET | Rollup: requests/min, token totals, cache-hit %, avg TPS, p95 TTFT, error rate, spend. Ranges ≤ 24 h read the in-memory ring; 7d/30d/all-time read DB aggregates. |
+| `/admin/stats/overview` | GET | Rollup: requests/min, token totals, cache-hit %, avg TPS, p95 TTFT, error rate, spend. Every window reads from the DB when a sink exists (AUDIT_REPORT M12); the in-memory ring serves only when no sink is configured. |
 | `/admin/stats/timeseries` | GET | Bucketed token/tps series (bucket size scales with range: 1 min → 1 day). |
 | `/admin/stream` | GET (SSE) | Realtime event stream consumed by the UI (live stats, log events). |
 
@@ -295,7 +290,7 @@ Hermes uses OAuth 2.0 device authorization (RFC 8628). Unlike Cline's paste-code
 | Endpoint | Method | Description |
 |---|---|---|
 | `/admin/users` | GET | List user accounts. |
-| `/admin/users/{uid}` | PATCH | Change role, disable, reset. |
+| `/admin/users/{uid}` | PATCH | Change role, disable. |
 
 ---
 
@@ -367,7 +362,7 @@ curl -X DELETE localhost:4000/admin/keys/<id> -H "$MK"
 ### Providers & key pools
 
 ```bash
-curl localhost:4000/admin/provider-catalog -H "$MK"     # 11 built-in cards + configured?
+curl localhost:4000/admin/provider-catalog -H "$MK"     # 12 built-in cards + configured?
 curl localhost:4000/admin/providers -H "$MK"            # pool status: health + cooldowns
 curl -X POST localhost:4000/admin/providers -H "$MK" \
   -d '{"name": "openai-backup", "provider_type": "openai",
@@ -410,7 +405,7 @@ curl -X PUT "localhost:4000/admin/pricing/<model_id>?provider=openai-main" -H "$
 curl localhost:4000/admin/logs/requests -H "$MK"     # DB-backed
 curl localhost:4000/admin/logs/proxy -H "$MK"        # ring buffer
 curl localhost:4000/admin/stats/overview -H "$MK"    # p50/p95/p99, cost, tokens
-curl "localhost:4000/admin/stats/timeseries?bucket=minute&metric=cost&minutes=60" -H "$MK"
+curl "localhost:4000/admin/stats/timeseries?bucket=minute&metric=tokens&minutes=60" -H "$MK"
 curl localhost:4000/admin/stream -H "$MK"            # SSE live tail
 curl localhost:4000/admin/alert-rules -H "$MK"
 curl -X PUT localhost:4000/admin/alert-rules -H "$MK" -d '{...}'
@@ -422,18 +417,18 @@ curl -X PATCH localhost:4000/admin/users/<uid> -H "$MK" -d '{"role": "admin"}'
 ### Session auth
 
 ```bash
-curl -X POST localhost:4000/auth/signup  -d '{"email": "...", "password": "..."}'
-curl -X POST localhost:4000/auth/login   -d '{"email": "...", "password": "..."}'
+curl -X POST localhost:4000/auth/signup  -d '{"username": "...", "password": "..."}'
+curl -X POST localhost:4000/auth/login   -d '{"username": "...", "password": "..."}'
 curl -X POST localhost:4000/auth/logout
 curl localhost:4000/auth/me
 curl -X POST localhost:4000/auth/playground-key       # the session's 24h key (reused)
 ```
 
-### OAuth providers (Cline / WorkBuddy)
+### OAuth providers (Cline / Hermes)
 
 ```bash
 # Cline
-curl -X POST localhost:4000/admin/cline/oauth/login-url -H "$MK" -d '{}'   # {auth_url, state}
+curl -X POST localhost:4000/admin/cline/oauth/login-url -H "$MK" -d '{}'   # {auth_url}
 curl -X POST localhost:4000/admin/cline/oauth/connect -H "$MK" -d '{"code": "..."}'
 curl -X POST localhost:4000/admin/cline/oauth/auto-connect -H "$MK" -d '{}'
 curl localhost:4000/admin/cline/oauth/status -H "$MK"
@@ -460,10 +455,4 @@ curl localhost:4000/admin/hermes/oauth/status?provider=hermes-main -H "$MK"
 curl -X POST localhost:4000/admin/hermes/oauth/refresh -H "$MK" -d '{"provider": "hermes-main", "key_label": "acct@example.com"}'
 # Disconnect one account, or the whole pool when key_label is omitted:
 curl -X DELETE localhost:4000/admin/hermes/oauth/disconnect -H "$MK" -d '{"provider": "hermes-main", "key_label": "acct@example.com"}'
-
-# WorkBuddy (CodeBuddy) — parallel API
-curl localhost:4000/admin/workbuddy/accounts -H "$MK"
-curl -X POST localhost:4000/admin/workbuddy/import -H "$MK" -d '{"accounts": [...]}'
-curl -X POST localhost:4000/admin/workbuddy/export -H "$MK"
-curl -X POST localhost:4000/admin/workbuddy/refresh -H "$MK" -d '{"label": "main"}'
 ```

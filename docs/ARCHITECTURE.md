@@ -37,9 +37,9 @@ The design mirrors LiteLLM's mental model (config-driven `model_list`, model gro
              │        ┌──────────┬──────────┬────┴─────┬─────────┐    │
  Admin UI ───┼─► /admin/* + /auth/* + /public/*        │         │    │
  (SPA)       │        ▼          ▼          ▼          ▼         ▼    │
-             │   13 provider adapters (openai, anthropic, gemini,     │
+             │   12 provider adapters (openai, anthropic, gemini,     │
              │   openai-compatible, openrouter, gmicloud, bai,        │
-             │   nvidia-nim, cline, workbuddy, opencode, hermes, ifm) │
+             │   nvidia-nim, cline, opencode, hermes, ifm)            │
              └────────────────────────────────────────────────────────┘
 ```
 
@@ -67,18 +67,18 @@ The design mirrors LiteLLM's mental model (config-driven `model_list`, model gro
 
 | Layer | Location | What it does |
 |---|---|---|
-| HTTP app | `wiwi/server/app.py` | FastAPI factory, pure-ASGI middleware chain (request id, body-size guard, latency headers), lifespan, SPA mount, and the routes that are still inline closures |
+| HTTP app | `wiwi/server/app.py` | FastAPI factory, pure-ASGI middleware chain (request id, body-size guard, latency headers), lifespan, SPA mount, `run_chat_like`, and the `include_router` mounts that bind each router factory to the per-app state |
 | HTTP errors | `wiwi/server/errors.py` | `APIError` (status + error type + dialect) and the per-dialect renderer; the app's exception handlers turn a raised `APIError` into the caller's dialect body (OpenAI `{"error":{…}}` / Anthropic `{"type":"error",…}`) |
 | HTTP deps | `wiwi/server/dependencies.py` | The auth guards as importable FastAPI dependencies (`require_user`, `require_admin`); they read the app state via `request.app.state.wiwi` and raise `APIError` rather than returning a response |
-| HTTP routers | `wiwi/server/routers/` | One module per admin surface; a router owns the HTTP shape (path, method, request/response models) and delegates the rules to `wiwi/server/services/` |
+| HTTP routers | `wiwi/server/routers/` | One module per surface (`v1_api`, `realtime`, `system`, `auth`, `public`, `admin_*`, `cline_oauth`, `hermes_oauth`); a router owns the HTTP shape (path, method, request/response models) and holds the rules inline (only `admin_keys` delegates to `wiwi/server/services/` so far) |
 | HTTP schemas | `wiwi/server/schemas/` | Pydantic v2 request/response models per surface. A validation failure is rendered as **400** (not FastAPI's 422) in the caller's dialect, by the `RequestValidationError` handler in `server/app.py` |
 | Services | `wiwi/server/services/` | The business rules behind the routes (authorization, invariants), raising `APIError`; no FastAPI imports, so the rules are testable without an HTTP client |
-| Wire codecs | `wiwi/wire/{openai_chat,openai_responses,anthropic_messages}.py` | `decode_request`, `encode_response`, `StreamEncoder`, `error_body` per dialect |
+| Wire codecs | `wiwi/wire/{openai_chat,openai_responses,anthropic_messages,openai_completions}.py` | `decode_request`, `encode_response`, `StreamEncoder`, `error_body` per dialect |
 | IR | `wiwi/ir/types.py`, `ir/builtin_tools.py` | `Part` union (`TextPart`, `ImagePart`, `ToolUsePart`, `ToolResultPart`, `ThinkingPart`, `AudioPart`, `DocumentPart`), `Message`, `Tool`, `ToolChoice*`, `ResponseFormat`, `GenParams`, `Request`, `Usage`, `AssistantTurn`, `Response`; hosted-tool registry |
-| Router | `wiwi/router/router.py` | Groups/deployments/keys, WRR picking, alias chains, `execute_with_retries`, health scoring (EWMA latency + success rate), adaptive cooldowns, session and prompt-prefix affinity |
+| Router | `wiwi/router/router.py` | Groups/deployments/keys, WRR picking, alias chains, `execute_with_retries`, session and prompt-prefix affinity |
 | Gateway | `wiwi/core/gateway.py` | Executes one IR request router → adapter → httpx; pumps deltas; TTFT/TPS timing; partial billing; stream-failure accounting |
 | Context | `wiwi/core/context.py` | `RequestContext` (surface, ir_req, auth, group, deployment, provider_key, attempts, usage, cost, est_tokens, stop_reason, status, error, metadata, forward_headers, cancel, …) |
-| Recovery | `wiwi/core/recovery.py` | Shared `Backoff`, `CircuitBreaker`, `parse_retry_after`, `build_url`; opt-in `HealthHealer` (1-token probes, graduated probation recovery). Used by router retries, Cline/WorkBuddy refresh services, healer. Imports nothing from router/gateway (cycle safety) |
+| Recovery | `wiwi/core/recovery.py` | Shared `Backoff`, `CircuitBreaker`, `parse_retry_after`, `build_url`; opt-in `HealthHealer` (1-token probes, graduated probation recovery). Used by router retries, Cline/Hermes refresh services, healer. Imports nothing from router/gateway (cycle safety) |
 | Streaming | `wiwi/streaming/` | `deltas.py` taxonomy, `sse.py` parse/encode, `resume.py` StreamTape, `tape_store.py` JournalStore, `partial_json.py`, `validation.py`, `coalesce.py`, `loopdetect.py` — see [STREAMING.md](STREAMING.md) |
 | Cache | `wiwi/cache/` | Opt-in exact-match response cache (`CacheSettings`, off by default): non-streaming only, keyed on normalized IR + group + surface + key id; bypass via `x-wiwi-no-cache`; memory or Redis backend; `ttl_s <= 0` disables it on both; a hit is rebased onto the serving request's identity (`hit_rebase.py`). `singleflight.py` dedupes identical concurrent non-streaming requests when enabled. |
 | Rate limit | `wiwi/ratelimit/` | Sliding-window rpm/tpm; sharded in-memory locks by default, `RedisRateLimiter` when `redis_url`/`REDIS_URL` is set so caps are shared across workers |
@@ -87,7 +87,7 @@ The design mirrors LiteLLM's mental model (config-driven `model_list`, model gro
 | Logging | `wiwi/logging_core/` | Three-stream logger: request (DB + SSE), proxy (stdout + SSE), audit (sync DB); `LogEvent` ring buffer feeds stats and the windowed metrics, process-lifetime `RequestTotals` carries the monotonic counters; every drop/failure mode is counted and surfaced on `/health` |
 | Config | `wiwi/config.py` | Pydantic v2 models, `load_config`/`load_env`, `PROVIDER_TYPES`, `os.environ/NAME` interpolation |
 | Config store | `wiwi/server/config_store.py` | DB-backed providers/keys/deployments/settings/model_prices (runtime-mutable) |
-| Stats/Metrics | `wiwi/server/stats.py`, `server/metrics.py` | Admin rollups (ring buffer for short ranges, DB aggregates for 7d/30d/all-time) and Prometheus `/metrics` |
+| Stats/Metrics | `wiwi/server/stats.py`, `server/metrics.py` | Admin rollups (DB-backed when a sink exists, in-memory ring otherwise) and Prometheus `/metrics` |
 | Frontend | `web/` | React 19 + Vite 6 + Tailwind 4 SPA; admin console (`/console`) + public front; built to `wiwi/server/static/`, mounted at `/` with history fallback |
 
 ## 5. Router & recovery
@@ -95,8 +95,8 @@ The design mirrors LiteLLM's mental model (config-driven `model_list`, model gro
 - **Model groups** (`model_name`) hold **deployments** (provider + `model_id` + weight/overrides). WRR splits traffic proportionally; `resolve_group` follows alias chains.
 - **Key pools**: each provider account holds multiple real keys with weights and health states (`active | cooling | invalid | disabled`). Errors trigger cooldowns; TPM accounting credits the key once output actually flows (`_defer_key_credit` on the streaming path).
 - **`execute_with_retries`** covers connect-phase retries (429/5xx/transient httpx → next attempt), deployment failover, and fallback groups.
-- **Health scoring (opt-in)**: `router_settings.health_model: scored` adds EWMA latency + success-rate scoring and adaptive cooldowns (`health_ewma_alpha`, `health_window`, `adaptive_cooldown`). Default `none` keeps bit-identical legacy behavior.
-- **HealthHealer (opt-in, default off)**: background service probing sick keys/deployments with 1-token requests, graduated (probation) recovery; wired in lifespan like the Cline/WorkBuddy refresh services.
+- **Health scoring (spec only, not implemented)**: `router_settings.health_model: scored` with `health_ewma_alpha`, `health_window`, `adaptive_cooldown` is a documented spec — none of these fields exists in `RouterSettings` yet (see CORE.md §8).
+- **HealthHealer (opt-in, default off)**: background service probing sick keys/deployments with 1-token requests, graduated (probation) recovery; wired in lifespan like the Cline/Hermes refresh services.
 
 ## 6. Streaming
 
@@ -141,7 +141,7 @@ A response-cache hit must leave `cache_hit=False` (`wiwi/server/app.py` response
 - **Master key** (`WIWI_MASTER_KEY` / config) guards `/admin/*` via `Authorization: Bearer`.
 - **Virtual keys** `sk-wiwi-…`: SHA-256-hashed at rest, constant-time compare, plaintext returned once at mint. Carry per-key model allowlists, budgets, rpm/tpm, expiry.
 - **User accounts**: stdlib PBKDF2 password hashing, HMAC-signed HttpOnly session cookies, roles (user sees only own keys' data; admin sees all).
-- **Provider secrets**: stored via config-store/admin API (encrypted at rest; the reveal endpoint is audit-logged).
+- **Provider secrets**: stored via config-store/admin API in plaintext (`provider_keys.secret`); the reveal endpoint is audit-logged, and the backup export includes secrets by design — treat both accordingly.
 - **Error translation**: `WiwiError` is the unified internal error type; each wire dialect owns `error_body()` so clients always see their own dialect's error shape.
 
 ## 10. Deployment

@@ -43,8 +43,8 @@ cd web && npm test                       # vitest over src/**/*.test.ts
 docker compose up --build
 
 # load test
-python3 bench.py                         # async httpx; TTFT, p50/p95, output TPS, concurrency sweep
-python3 bench.py -n 10 -c 1,4,16 --max-tokens 100
+python3 scripts/bench.py                         # async httpx; TTFT, p50/p95, output TPS, concurrency sweep
+python3 scripts/bench.py -n 10 -c 1,4,16 --max-tokens 100
 ```
 
 **npm is authoritative for `web/`.** `web/package-lock.json` and `start.sh` use npm; do not mix package managers in one session.

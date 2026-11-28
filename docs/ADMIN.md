@@ -1,6 +1,6 @@
 # wiwi — Admin Console & Management
 
-How wiwi is administered: the React SPA (admin console + public front), the master-key-guarded admin API, user accounts, and the realtime/eventing plumbing. For endpoint semantics see [API_REFERENCE.md](API_REFERENCE.md); for the key-pool/routing model see [ARCHITECTURE.md](ARCHITECTURE.md) §5.
+How wiwi is administered: the React SPA (admin console + public front), the admin API (master key or admin session), user accounts, and the realtime/eventing plumbing. For endpoint semantics see [API_REFERENCE.md](API_REFERENCE.md); for the key-pool/routing model see [ARCHITECTURE.md](ARCHITECTURE.md) §5.
 
 > Historical note: earlier revisions described a Next.js/shadcn design that was never built. The shipped stack is React 19 + Vite 6 + Tailwind 4.
 
@@ -10,7 +10,7 @@ How wiwi is administered: the React SPA (admin console + public front), the mast
 
 ```
 Browser ──► :4000/                  (SPA — admin console at /console + public front)
-        ──► :4000/admin/*           (admin JSON API, master-key auth)
+        ──► :4000/admin/*           (admin JSON API, master key or admin session)
         ──► :4000/auth/*            (user signup/login/logout, cookie session)
         ──► :4000/public/*          (secret-free catalog, no auth)
         ──► :4000/admin/stream      (SSE realtime events)
@@ -26,7 +26,7 @@ Browser ──► :4000/                  (SPA — admin console at /console + p
 
 | Actor | Credential | Guard | Sees |
 |---|---|---|---|
-| Admin (console) | Master key (`WIWI_MASTER_KEY`) | `Authorization: Bearer` on `/admin/*` | Everything |
+| Admin (console) | Master key (`WIWI_MASTER_KEY`) or admin session cookie | `Authorization: Bearer` / `wiwi_session` on `/admin/*` | Everything |
 | User (console) | Username + password | Signed HttpOnly session cookie via `/auth/*` | Own keys, own usage, `/app/*` subset |
 | Client app | Virtual key `sk-wiwi-…` | `Authorization: Bearer` / `x-api-key` on `/v1/*` | Allowed models only |
 
@@ -40,11 +40,11 @@ Admin-facing pages (under the guarded area; the sidebar is role-aware):
 
 | Page | What it shows / does |
 |---|---|
-| **Dashboard** | Stat cards (requests/min, tok_in/out/cached/reasoning, cache-hit %, avg TPS, p95 TTFT, error rate, spend); stacked area tokens/min; requests & errors lines; live sparklines off SSE `stats.tick`; zero-traffic empty states; refetch holds previous render at reduced opacity |
+| **Dashboard** | Stat cards (requests/min, tok_in/out/cached/reasoning, cache-hit %, avg TPS, p95 TTFT, error rate, spend); stacked area tokens/min; requests & errors lines; live sparklines off SSE `log.created` events; zero-traffic empty states; refetch holds previous render at reduced opacity |
 | **Providers** | Card per provider; search box filtering accounts by name, provider type, base URL, alias, or key label (whitespace-separated terms AND together); key table (label, masked secret, weight, status badge `active/cooling/invalid/disabled`, req/err counters, last used); add provider/key dialogs; enable/disable keys; per-key delete; provider edit (name/type/base_url) and delete; export/import provider config |
 | **Built-in Providers** | Catalog of the provider types that ship with wiwi; search box filtering by type, label, description, endpoint, or configured account/key name |
 | **Provider Detail** | Per-provider account settings, key pool management, live model list (`/admin/providers/{name}/models`) |
-| **Cline / WorkBuddy** | OAuth connect flows (login URL → callback `/cline/oauth/callback`), status/refresh/disconnect, account import/export, per-account settings |
+| **Cline** | OAuth connect flow (login URL → callback `/cline/oauth/callback`), status/refresh/disconnect, per-account settings |
 | **Hermes / Hermes OAuth** | Manage Hermes (Nous Portal) accounts; connect via OAuth 2.0 device-code (`/console/hermes-oauth`) — no API key needed — with status, refresh, and disconnect |
 | **Models** | Model groups + deployments; add/remove deployments; group patching; aliases (`/admin/aliases`) |
 | **Virtual Keys** | Mint (name, models, budget, rpm/tpm, expiry — plaintext shown once), patch, disable, delete |
@@ -56,17 +56,17 @@ Admin-facing pages (under the guarded area; the sidebar is role-aware):
 | **Alert Rules** | Spend/alert thresholds (`/admin/alert-rules`) |
 | **Users** | Account list, role changes, disable (admin only) |
 
-Public front pages (unauthenticated, `PublicLayout`): Landing, Models catalog (`/public/models`), Docs, Playground, Pricing, Integrations, Enterprise, OpenSource, Apps, Agents, Partners, Referrals, Ship, Migration, Timeline, About, Legal, SSO, and similar — ~30 public pages mixed with the console pages across 56 components in `web/src/pages/`. **Never assume a page is admin-facing from the directory alone.**
+Public front pages (unauthenticated, `PublicLayout`): Landing, Models catalog (`/public/models`), Docs, Playground, Pricing, Integrations, Enterprise, OpenSource, Apps, Agents, Partners, Referrals, Ship, Migration, Timeline, About, Legal, SSO, and similar — ~30 public pages mixed with the console pages across 52 components in `web/src/pages/`. **Never assume a page is admin-facing from the directory alone.**
 
 ## 4. Realtime
 
-- `GET /admin/stream` (SSE) is the single realtime channel: live `stats.tick` events, request/proxy log events, provider health changes.
+- `GET /admin/stream` (SSE) is the single realtime channel: request `log.created` events and upstream `proxy.log` events.
 - The Dashboard aggregates client-side; SSE carries live data, and TanStack Query refetch intervals are a 30 s fallback for the slower pages, not the primary update path.
 - Refetch behavior: previous render held at reduced opacity — no skeleton flash.
 
 ## 5. Provider & key-pool management flow
 
-1. **Add provider**: Providers → Add (type from `/admin/provider-catalog`, name, base_url, credentials) → `POST /admin/providers`. For Cline/WorkBuddy use the OAuth connect flow instead of raw keys.
+1. **Add provider**: Providers → Add (type from `/admin/provider-catalog`, name, base_url, credentials) → `POST /admin/providers`. For Cline/Hermes use the OAuth connect flow instead of raw keys.
 2. **Key pool**: add multiple keys per provider with labels + weights; toggle/patch/delete individually; reveal secret (audit-logged).
 3. **Health states**: `active | cooling | invalid | disabled`, updated live from request outcomes; Dashboard/Providers pages reflect cooldowns via SSE.
 4. **Model deployments**: Models → group → add deployment (provider + model_id + weight); WRR and failover pick these up on the next request. Edits are durable: weight changes and detaches are written to the `deployments` table (`detached=1` tombstones a detach), and a DB row overrides the YAML `model_list` entry for the same group/provider/model on restart.

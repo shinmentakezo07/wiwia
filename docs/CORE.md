@@ -34,9 +34,9 @@ wiwi/
 │   ├── base.py           # ProviderAdapter protocol · WiwiError · ProviderKeyRef · error mappers
 │   ├── registry.py       # get_adapter / fresh_adapter + import-time branch-coverage assert
 │   ├── openai_adapter.py # reference adapter (also serves openai-compatible/gmicloud/bai shapes)
-│   ├── anthropic_adapter.py · gemini_adapter.py · openrouter_adapter.py · nim_adapter.py
+│   ├── anthropic_adapter.py · gemini_adapter.py · openrouter_adapter.py · nim_adapter.py · ifm_adapter.py
 │   ├── cline_adapter.py (+ cline_oauth.py, cline_auto_refresh.py)
-│   ├── workbuddy_adapter.py (+ workbuddy_auth.py, workbuddy_auto_refresh.py)
+│   ├── hermes_adapter.py (+ hermes_oauth.py, hermes_auto_refresh.py)
 │   └── opencode_adapter.py (+ opencode_version.py)
 ├── streaming/            # delta taxonomy + guards + tape/journals (see STREAMING.md)
 │   ├── deltas.py · sse.py · resume.py · tape_store.py
@@ -129,7 +129,7 @@ Sliding-window counters per key: `memory.py` (default) and `redis.py` (selected 
 Exact-match, non-streaming only, no builtin tools. Key = normalized IR + group + surface + key id (`keygen.py`). Backends: `MemoryResponseCache` (LRU + lazy TTL, `max_entries` 1024) and Redis. Per-request bypass: `x-wiwi-no-cache`. Hit accounting uses `response_cache_hit`, never `cache_hit` (that's the provider prompt-cache flag). `ttl_s <= 0` disables the cache on both backends (one startup warning). A hit is rebased onto the serving request's identity — `id` and `created`/`created_at` describe the request being answered, so a Responses hit's `resp_…` id stays dereferenceable (`hit_rebase.py`). `singleflight.py` is a separate, opt-in path that dedupes identical **concurrent** requests; it does not populate the response cache.
 
 ### Performance and accounting
-The write-light path is documented in [ARCHITECTURE.md](ARCHITECTURE.md) §6.1 and the knobs in [CONFIG.md](CONFIG.md): batched spend settlement, singleflight, buffered stream journals, sharded limiter locks, the NIM schema memo, configurable outbound HTTP pool limits, 1024-entry response cache, and prompt-prefix affinity. Only `spend_batching_enabled`, `singleflight_enabled`, and `prefix_affinity` change semantics, so all three default off; `perf_timings` emits `x-wiwi-timings` for `bench.py`.
+The write-light path is documented in [ARCHITECTURE.md](ARCHITECTURE.md) §6.1 and the knobs in [CONFIG.md](CONFIG.md): batched spend settlement, singleflight, buffered stream journals, sharded limiter locks, the NIM schema memo, configurable outbound HTTP pool limits, 1024-entry response cache, and prompt-prefix affinity. Only `spend_batching_enabled`, `singleflight_enabled`, and `prefix_affinity` change semantics, so all three default off; `perf_timings` emits `x-wiwi-timings` for `scripts/bench.py`.
 
 ### Cost (`cost/`)
 `CostEngine` resolves tokens → USD from DB-backed `model_prices` (`server/config_store.py`) with a bundled fallback table; `estimate_tokens_async` provides the chars/4-style estimate when usage is missing (`UsageFinal.estimated=True`).

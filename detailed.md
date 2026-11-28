@@ -1192,7 +1192,7 @@ Auth failures keep their HTTP status but are `retryable=True`. This means the ro
 | File | Role |
 |---|---|
 | `wiwi.yaml.example` | Tracked config template |
-| `bench.py` | Standalone benchmark harness (TTFT/latency/TPS) |
+| `scripts/bench.py` | Standalone benchmark harness (TTFT/latency/TPS) |
 | `Dockerfile` | Multi-stage build (uv builder → python:3.12-slim) |
 | `docker-compose.yml` | Compose with optional `pg` profile |
 | `pyproject.toml` | Deps, entry point, pytest/ruff config |

@@ -2,7 +2,7 @@
 
 Agent guide for **wiwi** — a self-hosted unified LLM gateway proxy (FastAPI; `requires-python
 >=3.11`, ambient interpreter is 3.13).
-Three inbound API dialects route through one canonical internal representation (IR) to thirteen
+Three inbound API dialects route through one canonical internal representation (IR) to twelve
 outbound provider types; responses are always re-encoded in the caller's inbound dialect. Two
 further inbound routes reuse that same pipeline rather than adding a fourth dialect: legacy
 `POST /v1/completions` (bare `prompt` in, `choices[].text` out) and
@@ -57,10 +57,11 @@ stage (carries `surface`, params, auth, and the chosen dialect encoder).
 `GET /public/models`, `GET /health`, a configurable Prometheus path (`server/metrics.py`),
 `/admin/*` (master key), `/auth/*` (user sessions), `/cline/oauth/callback`.
 
-That is **9 routes under `/v1` and 59 under `/admin`**. Most are defined in
-the `create_app` closure in `server/app.py`; the `/admin/keys` ones live in
-`wiwi/server/routers/admin_keys.py` and are mounted with `include_router`, so
-a grep over `app.py` alone under-counts them. Count them with:
+That is **9 routes under `/v1` and 54 under `/admin`** (measured; the parity
+script below is truth, not this number). Every route handler lives in
+`wiwi/server/routers/` — one module per surface — and `create_app` mounts each
+with `include_router`, so a grep over `app.py` under-counts them. Count them
+with:
 
 ```bash
 python3 -c "
@@ -110,15 +111,15 @@ with no `Finish`. All delta variants are `@dataclass(frozen=True)`.
 | `wiwi/cache/` | `build_response_cache()`, `keygen.py`, `response_cache.py`, `redis_cache.py`, `interface.py`, `hit_rebase.py` (rebases a hit's `id`/`created` onto the serving request), `singleflight.py` (opt-in concurrent-request dedupe) |
 | `wiwi/cost/` | `pricing.py` |
 | `wiwi/logging_core/` | `db_sink.py`, `events.py`, `subsystem.py` (structlog workers), `hist.py`, `retention.py` |
-| `wiwi/server/` | `app.py` (~7.7k lines: `create_app`, `AppState`, `lifespan`, the error handlers, and the routes that are still inline closures), `config_store.py` (SQL DDL + admin persistence), `response_store.py` (Responses-API state), `backup.py`, `metrics.py`, `stats.py`, `static/` (built SPA) |
-| `wiwi/server/routers/` | HTTP routers, one module per admin surface. A router owns the HTTP shape (path, method, request/response models) and delegates the rules to `wiwi/server/services/`. Built per app in `create_app` (the service is per-app); the auth guard is a module-level dependency |
+| `wiwi/server/` | `app.py` (~3.6k lines: `create_app`, `AppState`, `lifespan`, `run_chat_like`, the error handlers, and the `include_router` mounts), `config_store.py` (SQL DDL + admin persistence), `response_store.py` (Responses-API state), `backup.py`, `metrics.py`, `stats.py`, `static/` (built SPA) |
+| `wiwi/server/routers/` | HTTP routers, one module per surface (`v1_api`, `realtime`, `system`, `auth`, `public`, `admin_*`, `cline_oauth`, `hermes_oauth`). A router owns the HTTP shape (path, method, request/response models) and the rules live inline (only `admin_keys` delegates to `wiwi/server/services/` so far); per-surface factories in `create_app` bind them to the per-app state and closure helpers, and the auth guards are module-level dependencies in `wiwi/server/dependencies.py` |
 | `wiwi/server/schemas/` | Pydantic v2 request/response models per surface. `extra="ignore"`, and a validator raises `ValueError` (a `TypeError` escapes as a 500) |
 | `wiwi/server/services/` | The business rules behind the routes (authorization, invariants), raising `APIError`. No FastAPI imports, so the rules are testable without an HTTP client |
 | `wiwi/server/dependencies.py` | The auth guards as importable FastAPI dependencies (`require_user`, `require_admin`), reading the app state via `request.app.state.wiwi`. They must stay module-level: a per-app closure is invisible to FastAPI's annotation resolver, which silently demotes the parameter to a body field |
 | `wiwi/server/errors.py` | `APIError` (status + error type + dialect) and the per-dialect renderer. The app's exception handlers turn a raised `APIError` into the caller's dialect body, and a request-validation failure into a **400** (not FastAPI's 422) |
 | `wiwi/config.py` | Pydantic v2 config models + `load_config`; `PROVIDER_TYPES` is the single source of truth |
 | `wiwi/main.py` | CLI entrypoint (`wiwi.main:cli`) |
-| `web/` | Admin SPA + public site (React 19, TS strict, Vite 6, Tailwind 4) — 56 components in `src/pages/`, builds to `wiwi/server/static/` |
+| `web/` | Admin SPA + public site (React 19, TS strict, Vite 6, Tailwind 4) — 52 components in `src/pages/`, builds to `wiwi/server/static/` |
 | `tests/` | pytest suite — 251 files collecting ~4,300 tests; bugfix regressions in `test_fix_roundN.py` |
 | `docs/` | Design specs (see **Important Files**) |
 
@@ -152,7 +153,7 @@ docker compose up --build
 ./deploy/hf_space.sh                        # export committed HEAD into the Space and push
 
 # load test
-python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95, output TPS
+python3 scripts/bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95, output TPS
 ```
 
 ## Code Conventions & Common Patterns
@@ -200,10 +201,15 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
   env vars win.
 - `wiwi/config.py` — Pydantic config models; `load_config`, `load_config_from_string`;
   `os.environ/NAME` interpolation is resolved here.
-- `wiwi/server/app.py` — ~7.7k lines in one `create_app` closure: `create_app(config)`,
-  `create_app_from_config_path` (uvicorn reload factory), `AppState`, `lifespan`, `run_chat_like`,
-  the error handlers, and most of the routes (the `/admin/keys` ones live in
-  `wiwi/server/routers/admin_keys.py`). Navigate it by grepping for a route prefix, not by reading.
+- `wiwi/server/app.py` — ~3.6k lines: `create_app(config)`,
+  `create_app_from_config_path` (uvicorn reload factory), `AppState`, `lifespan`,
+  `run_chat_like`, and the error handlers. The route handlers live in
+  `wiwi/server/routers/` (`v1_api`, `realtime`, `system`, `auth`,
+  `admin_providers`, `admin_models`, `admin_keys`, `admin_logs`, `admin_stats`,
+  `admin_pricing`, `admin_users`, `admin_backup`, `admin_cline_settings`,
+  `cline_oauth`, `hermes_oauth`, `public`); each factory receives the per-app
+  state and closure helpers. Navigate app.py by grepping for a helper name, and
+  a route by grepping its router module.
 - `wiwi/server/config_store.py` — SQL DDL + migrations for admin-managed providers, keys,
   deployments, prices, settings.
 - `wiwi/server/response_store.py` — persisted Responses-API state behind
@@ -216,7 +222,7 @@ python3 bench.py -n 10 -c 1,4,16 --max-tokens 100               # TTFT, p50/p95,
 - `wiwi.yaml.example` / `.env.example` — config shape and env vars (`WIWI_MASTER_KEY`,
   `DATABASE_URL`, provider keys).
 - `Dockerfile`, `docker-compose.yml`, `start.sh` (npm; runs backend + Vite together),
-  `bench.py`.
+  `scripts/bench.py`.
 - `deploy/` — `hf_space.sh` pushes the gateway to the HuggingFace Docker Space
   `shimen/yapapa` (`git archive HEAD` → scratch clone → one commit; the repo's
   `README.md` never travels, because the Space's `README.md` is its YAML manifest —

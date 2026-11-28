@@ -176,7 +176,7 @@ Connect via the admin UI (Providers → Cline → Connect) or the OAuth endpoint
 OpenCode Zen (`opencode.ai/zen`) — a multi-protocol gateway: four upstream wire formats, each published on its own canonical base URL and chosen per model (see the Zen endpoints table: responses/chat `https://opencode.ai/inference/openai/v1`, messages `https://opencode.ai/inference/anthropic/v1`, gemini `https://opencode.ai/inference/google/v1beta`). A deployment-set `base_url` overrides them all. The adapter:
 
 - Routes each model to its correct upstream protocol.
-- Declares `force_stream` (the same `transport.forceStream: true` OpenCode's own provider entry carries): Zen answers as an event stream, so every upstream request asks for SSE and a non-streaming caller's reply is reassembled by the gateway's pump — like `cline` and `workbuddy`. The `gemini` route selects its wire from the URL (`:streamGenerateContent?alt=sse`), so its body carries no `stream` field. Also forces `stream_options.include_usage` on chat requests so an aggregated turn prices on real usage rather than the estimator.
+- Declares `force_stream` (the same `transport.forceStream: true` OpenCode's own provider entry carries): Zen answers as an event stream, so every upstream request asks for SSE and a non-streaming caller's reply is reassembled by the gateway's pump — like `cline`. The `gemini` route selects its wire from the URL (`:streamGenerateContent?alt=sse`), so its body carries no `stream` field. Also forces `stream_options.include_usage` on chat requests so an aggregated turn prices on real usage rather than the estimator.
 - Carries the official client's metadata headers (`x-opencode-session` + `x-opencode-session-id`, `x-opencode-client`, `x-opencode-project`), with `x-opencode-session` **reused per credential** rather than minted per request, and refreshes its `opencode/<version>` User-Agent live (`opencode_version.py`) so the upstream sees a current client version (below ~1.19 is `426 UpgradeRequired`; the cold-cache fallback is a real version, because `opencode/unknown` is a `403`).
 
 **The free tier is a request-shape gate, and the shape is the client's.** `*-free` models (and the stealth `big-pickle`) answer `200` only for a request presenting the current client's fingerprint. The adapter supplies it, derived by capturing the real client and bisecting its request (2026-10-14): the tool payload must contain `read` and `shell` **carrying the client's real parameter schemas** (v1's pair was `bash`/`read`; v2 renamed `bash`), `Authorization` must be present (`Bearer public` when anonymous), `x-opencode-session-id` must ride alongside `x-opencode-session`, and `HTTP-Referer`/`x-opencode-request` must be absent — the client sends neither and each one alone turns a 200 into a 403. The `User-Agent` must carry a version the upstream still accepts (`opencode/unknown` 403s, below ~1.19 is `426`); the version helper's cold-cache fallback is therefore a real version, not a placeholder. A policy refusal still surfaces as `402 … requires billing (403)` and leaves the key pool alone, so the request fails over instead of retiring healthy keys.
@@ -413,8 +413,8 @@ with `realtime_url(base_url)`, derived from the deployment's configured base URL
 
 The capability is per adapter, not per wire shape. The four OpenAI-shaped
 providers (`openai`, `openai-compatible`, `gmicloud`, `bai`) implement it;
-`openrouter`, `nvidia-nim`, `cline` and `workbuddy` share the chat wire shape
-but **not** the realtime protocol, and answer `501` rather than inheriting a URL
+`openrouter`, `nvidia-nim` and `cline` share the chat wire shape but **not**
+the realtime protocol, and answer `501` rather than inheriting a URL
 that would 404 mid-session. `anthropic`, `gemini`, `opencode` and `hermes` have
 no realtime surface at all.
 

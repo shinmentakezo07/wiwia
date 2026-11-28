@@ -1514,3 +1514,28 @@ rule; the subtract-direction sites migrate to the same helpers so the
 convention has one implementation.
 
 ---
+
+### 618. Usage page: the Export CSV button was clipped off-screen at 375px
+
+**Severity:** 🟡 Low · **Status: fixed** — round 214
+**Files:** `web/src/pages/Usage.tsx` (PageHeader `right` slot)
+
+**Trigger:** open `/console/usage` at 375px. The header controls row
+(`LiveBadge` + refresh + range `Select` + `Export CSV` + import) is a
+non-wrapping flex row; the document reported `scrollWidth == clientWidth`
+because the row's container clipped rather than scrolled, so the Export
+button's right edge sat at 437px — 62px unreachable, an invisible control.
+**Fix:** the row wraps (`flex-wrap`), so the buttons that do not fit drop to
+a second line. Violated the binding rule that every UI change works at 375px.
+
+### 619. Request Logs: metric-card labels truncated at desktop widths
+
+**Severity:** 🟡 Low · **Status: fixed** — round 214
+**Files:** `web/src/pages/RequestLogs.tsx` (summary band)
+
+**Trigger:** the six-tile metric band went 6-up at `xl` (1280px), which at
+the common 1365px laptop viewport left ~146px per tile — enough for
+"REQUESTS" and "TOKENS", but "P95 LATENCY" and "THROUGHPUT" rendered as
+"P95 LATEN…" / "THROUGHP…". **Fix:** six-up now starts at `2xl` (1536px+);
+`sm`–`xl` stay 3-up, where every label fits.
+---

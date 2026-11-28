@@ -1151,3 +1151,18 @@ usage conventions keep their re-base, `stream: true` still streams on every
 surface, well-formed `strict` survives to the upstream, the empty-turn message
 shape is unchanged, and the force-stream fold's tool-call and stop-reason
 carriers are byte-identical to before.
+
+## Round 214 — SSE frames: drop the bytes→str→bytes round-trip (2026-11-28)
+
+Every streamed frame in all four dialect encoders paid an encode→decode→encode
+pass for nothing: `sse_frame(event, orjson.dumps(payload).decode())` built the
+JSON bytes, decoded them to a str, and `sse_frame` re-encoded that str. Nine
+sites (`wire/anthropic_messages.py:817`, `wire/openai_chat.py` ×5,
+`wire/openai_completions.py` ×2, `wire/openai_responses.py:854`) now pass the
+orjson bytes straight through — `sse_frame` accepts `str | bytes` and a bytes
+payload already flows through unchanged, so the emitted frames are
+byte-identical while the per-token path drops two allocations and a full
+UTF-8 round-trip per frame. Also removed `wire/openai_completions.error_body`,
+a byte-identical duplicate of the chat dialect's: both `app._error_body_for`
+and `errors.error_body_for` already route the `completions` surface to
+`openai_chat.error_body`, so nothing could reach it.

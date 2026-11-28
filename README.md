@@ -515,7 +515,7 @@ Four things wiwi does that a config-file gateway doesn't.
 
 ### ⚡ Performance
 
-- **Opt-in, because they change semantics:** batched spend settlement (`spend_batching_enabled`), concurrent-request dedupe (`singleflight_enabled`), and prompt-prefix affinity (`prefix_affinity`). `perf_timings` emits `x-wiwi-timings` for `bench.py`.
+- **Opt-in, because they change semantics:** batched spend settlement (`spend_batching_enabled`), concurrent-request dedupe (`singleflight_enabled`), and prompt-prefix affinity (`prefix_affinity`). `perf_timings` emits `x-wiwi-timings` for `scripts/bench.py`.
 - **Always on:** buffered stream-journal appends, sharded rate-limiter locks, the NIM tool-schema memo, configurable outbound HTTP pool limits, a 1024-entry response cache, and SQLite WAL / Postgres pool tuning.
 - **Redis, when configured, backs the rate limiter as well as the response cache**, so rpm/tpm caps are shared across workers.
 - Measured against a mock upstream: streaming at concurrency 32 improved 1.4–3.4x in RPS with p95 down 25–35%; the spend path issues 3x fewer `UPDATE`s; singleflight collapses 40 identical concurrent calls to 2–3 upstream calls. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §6.1 for the caveats.
@@ -872,7 +872,7 @@ python3 scripts/audit_lint.py
 # Focused tests and benchmark — also run from the repo root
 python3 -m pytest tests/test_fix_round211.py -q            # highest-numbered regression file at last review
 python3 -m pytest tests/test_router.py -k cooldown -q      # by name
-python3 bench.py -n 10 -c 1,4,16                            # TTFT / p50 / p95 / TPS sweep
+python3 scripts/bench.py -n 10 -c 1,4,16                            # TTFT / p50 / p95 / TPS sweep
 ```
 
 The suite mixes **unit tests** (`respx` HTTP mocks), **ASGI end-to-end** runs through the full app, and

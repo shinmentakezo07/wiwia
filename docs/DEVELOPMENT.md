@@ -34,7 +34,7 @@ uvicorn wiwi.server.app:create_app_from_config_path --factory
 
 Frontend dev server (`cd web && npm run dev`) proxies `/admin /v1 /auth /public /health` → `:4000`. Production SPA build: `cd web && npm run build` → `wiwi/server/static/` (served at `/`; gitignored — builds produce it).
 
-Load test: `python3 bench.py` (async httpx; TTFT, p50/p95, TPS, concurrency sweep).
+Load test: `python3 scripts/bench.py` (async httpx; TTFT, p50/p95, TPS, concurrency sweep).
 
 ## 3. Testing
 

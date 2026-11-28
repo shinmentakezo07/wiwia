@@ -123,7 +123,7 @@ bit-identically.
    - Adaptive cooldown growth, 60s cap, Retry-After precedence, streak reset on success
 2. Full suite green **unmodified** (strict-compat gate):
    `python3 -m pytest tests/ -q && ruff check wiwi/ tests/`
-3. Optional: `bench.py` before/after against a live gateway for the perf delta.
+3. Optional: `scripts/bench.py` before/after against a live gateway for the perf delta.
 
 ## Risks
 

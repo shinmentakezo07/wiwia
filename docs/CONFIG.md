@@ -131,7 +131,7 @@ wiwi_settings:
 | `http_max_connections` | `200` | Outbound `httpx` connection pool ceiling for provider calls. The old httpx default (100) queues streams behind the pool under high fan-out. |
 | `http_max_keepalive_connections` | `40` | Keep-alive connections retained in the outbound pool. |
 | `http_keepalive_expiry_s` | `30.0` | Idle keep-alive expiry for the outbound pool. |
-| `perf_timings` | `false` | Emit `x-wiwi-timings` (per-stage milliseconds: `decode`, `auth`, `admit`, `dispatch`, `upstream`, `encode`) so `bench.py` can attribute latency. Streaming responses carry only the first four. Off by default; the marks cost a few `monotonic()` calls per request. |
+| `perf_timings` | `false` | Emit `x-wiwi-timings` (per-stage milliseconds: `decode`, `auth`, `admit`, `dispatch`, `upstream`, `encode`) so `scripts/bench.py` can attribute latency. Streaming responses carry only the first four. Off by default; the marks cost a few `monotonic()` calls per request. |
 
 **Spend batching and crash safety.** The batched path keeps the admission reservation in the database until the flush. If the process dies before a flush, the reservation remains (headroom shrinks, fail closed) and the buffered charge is lost; the flush interval and the two caps bound that exposure, and a key near its budget is flushed synchronously. With `shared_database: true`, startup reclaims only reservations older than `reservation_stale_s`, so a sibling replica's live reservation is not erased. With `spend_batching_enabled: false`, the original two-write path is used.
 
@@ -494,7 +494,6 @@ There is no `api_key` field and no `budget_cap` field on a provider — keys liv
 | `bai` | `https://api.b.ai/v1` | `Authorization: Bearer` |
 | `nvidia-nim` | `https://integrate.api.nvidia.com/v1` | `Authorization: Bearer` |
 | `cline` | `https://api.cline.bot/api/v1` | OAuth → `Bearer workos:<token>` |
-| `workbuddy` | `https://copilot.tencent.com` | OAuth → access token |
 | `opencode` | `https://opencode.ai/inference/openai/v1` | per-wire (Bearer / `x-api-key` / `x-goog-api-key`) |
 | `hermes` | `https://inference-api.nousresearch.com/v1` | `Authorization: Bearer` (API key or OAuth device-code token) |
 | `ifm` | `https://api.ifm.ai/v1` | `Authorization: Bearer` (+ `X-Session-ID` conversation affinity) |
@@ -513,7 +512,7 @@ providers:
 
 **`nvidia-nim`** has JSON Schema quirks: it rejects boolean subschemas (`"additionalProperties": true`) and parameters named `type`. wiwi adapts tool schemas automatically via `nim_tool_schema.py` / `nim_native_tools.py`. See [PROVIDERS.md](PROVIDERS.md).
 
-**`cline`** and **`workbuddy`** are OAuth, and there is **no** `client_id` / `client_secret` in config — `cline_oauth.py` states "no client_id / no PKCE" and `workbuddy_auth.py` reads no environment variables at all. Connect them through the admin UI or the OAuth endpoints, then the access/refresh token lands in the key pool. Tokens refresh on demand, which is what makes their requests survive a 401. **`hermes`** (Nous Portal) connects the same way, but via OAuth 2.0 device authorization (`/console/hermes-oauth`); the device-code call bootstraps the account, so no key is needed up front. Each Hermes account is stored as its own pool key, so connecting several gives them a shared round-robin pool (each account has its own refresh token and rate-limit bucket); a background sweeper rotates each token before it expires, and a mid-session `401` rotates it on demand and retries once. See [PROVIDERS.md](PROVIDERS.md).
+**`cline`** is OAuth, and there is **no** `client_id` / `client_secret` in config — `cline_oauth.py` states "no client_id / no PKCE". Connect through the admin UI or the OAuth endpoints, then the access/refresh token lands in the key pool. Tokens refresh on demand, which is what makes requests survive a 401. **`hermes`** (Nous Portal) connects the same way, but via OAuth 2.0 device authorization (`/console/hermes-oauth`); the device-code call bootstraps the account, so no key is needed up front. Each Hermes account is stored as its own pool key, so connecting several gives them a shared round-robin pool (each account has its own refresh token and rate-limit bucket); a background sweeper rotates each token before it expires, and a mid-session `401` rotates it on demand and retries once. See [PROVIDERS.md](PROVIDERS.md).
 
 **`opencode`** routes per-model across four upstream protocols and refreshes its `opencode/<version>` User-Agent live.
 
