@@ -156,7 +156,7 @@ class HermesAutoRefresh:
 
         ``force`` (the admin refresh path) bypasses the circuit breaker — an
         operator asking for a rotation is the documented way out of a tripped
-        account (mirrors ``workbuddy_auto_refresh.refresh_key_now``).
+        account (mirrors :func:`wiwi.providers.cline_auto_refresh.rotate_now`).
 
         Returns True when the account's token is fresh afterwards (we rotated
         it, or another caller did while we waited), False when nothing was
@@ -262,7 +262,7 @@ class HermesAutoRefresh:
             if k.label != label:
                 continue
             k.secret = secret
-            # See workbuddy_auto_refresh: a refreshed token is a reset.
+            # See cline_auto_refresh: a refreshed token is a reset.
             k.recover(force=True)
             try:
                 await self._state.config_store.update_key_secret(
@@ -333,7 +333,7 @@ async def refresh_key_now(state: AppState, provider_name: str,
                           key_label: str) -> dict[str, Any]:
     """Rotate one pool key's token on demand (admin API surface).
 
-    Mirrors :func:`wiwi.providers.workbuddy_auto_refresh.refresh_key_now`, and
+    Mirrors :func:`wiwi.providers.cline_auto_refresh.refresh_key_now`, and
     resolves the worker through :func:`_worker_for` rather than reaching for
     ``state.hermes_refresh`` directly. That distinction is load-bearing: the
     lifespan-owned attribute is ``None`` before startup (and in minimal test
@@ -386,9 +386,8 @@ def _worker_for(state: AppState) -> HermesAutoRefresh:
     _dead`` — for Hermes the worst case of the three refreshers, because an
     inherited ``mark_dead`` makes a legitimately reconnected account read as
     permanently unreloginable. Anchoring the cache to the state makes the worker
-    unreachable — and collectable — as soon as the state dies. Mirrors
-    ``workbuddy_auto_refresh._worker_for`` (the same shape
-    ``cline_auto_refresh`` reaches with a weakref-carrying entry).
+    unreachable — and collectable — as soon as the state dies (the same
+    shape ``cline_auto_refresh`` reaches with a weakref-carrying entry).
     """
     shared = getattr(state, "hermes_refresh", None)
     if shared is not None:

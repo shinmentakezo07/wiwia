@@ -9,7 +9,6 @@ are documented in docs/API_REFERENCE.md; AUDIT #213 tracked the old gap.
 
 from __future__ import annotations
 
-import json
 import time
 from typing import Any
 
@@ -35,20 +34,20 @@ def _load_args(raw_args: Any) -> dict[str, Any]:
     A client replaying history may send arguments the upstream stream never
     closed; parse them rather than dropping the whole call. A JSON *object*
     (which some gateways emit instead of the spec's string) is used directly —
-    json.loads would raise TypeError, not JSONDecodeError, and 500 the
+    orjson.loads would raise TypeError, not JSONDecodeError, and 500 the
     gateway.
     """
     if isinstance(raw_args, dict):
         return raw_args
     try:
-        parsed = json.loads(raw_args)
+        parsed = orjson.loads(raw_args)
         return parsed if isinstance(parsed, dict) else {}
-    except (json.JSONDecodeError, TypeError):
+    except (ValueError, TypeError):
         pass
     try:
-        parsed = json.loads(_repair_truncated_json(raw_args))
+        parsed = orjson.loads(_repair_truncated_json(raw_args))
         return parsed if isinstance(parsed, dict) else {}
-    except (json.JSONDecodeError, TypeError):
+    except (ValueError, TypeError):
         return {}
 
 def _decode_image(url: Any) -> ir.ImagePart | None:
@@ -112,10 +111,10 @@ def _item_text(item: dict[str, Any]) -> str:
                         if isinstance(c, dict)
                         and c.get("type") in ("output_text", "text")
                         and isinstance(c.get("text"), str)) \
-            or json.dumps(output)
+            or orjson.dumps(output).decode()
     if output is None:
         return ""
-    return json.dumps(output)
+    return orjson.dumps(output).decode()
 
 
 def _item_images(item: dict[str, Any]) -> list[ir.ImagePart]:
@@ -412,7 +411,7 @@ def decode_request(body: dict[str, Any],
         elif itype == "function_call":
             raw_args = item.get("arguments")
             if isinstance(raw_args, dict):
-                raw_args = json.dumps(raw_args)  # args-as-object gateways
+                raw_args = orjson.dumps(raw_args).decode()  # args-as-object gateways
             else:
                 if not isinstance(raw_args, str):
                     # A truthy scalar (5, true, ["a"]) is not a JSON argument
@@ -768,7 +767,7 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
                                              t.builtin))
         else:
             output.append(_function_call_item(f"fc_{req_id}_{out_id}", t.id, t.name,
-                                              json.dumps(t.args)))
+                                              orjson.dumps(t.args).decode()))
         out_id += 1
     u = turn.usage
     # Usage convention re-base: OpenAI totals the prompt INCLUDING cached
@@ -851,7 +850,7 @@ class ResponsesStreamEncoder:
     def _evt(self, etype: str, payload: dict[str, Any]) -> bytes:
         payload = {"type": etype, "sequence_number": self._seq, **payload}
         self._seq += 1
-        return sse_frame("", orjson.dumps(payload).decode())
+        return sse_frame("", orjson.dumps(payload))
 
     def _item_done(self, idx: int, item: dict[str, Any]) -> bytes:
         """output_item.done — the one event every closed item has in common.

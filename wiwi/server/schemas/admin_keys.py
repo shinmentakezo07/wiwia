@@ -186,9 +186,15 @@ class VirtualKeyResponse(BaseModel):
 
 
 class KeyListResponse(BaseModel):
-    """Body of ``GET /admin/keys``."""
+    """Body of ``GET /admin/keys``.
+
+    *priority_lanes* carries the configured lane names so the console can
+    offer them in the key dialogs without a second endpoint; it is empty when
+    the operator configured none.
+    """
 
     keys: list[VirtualKeyResponse]
+    priority_lanes: list[str] = []
 
 
 class KeyGenerateResponse(BaseModel):

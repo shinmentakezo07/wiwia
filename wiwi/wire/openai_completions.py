@@ -182,7 +182,7 @@ class CompletionStreamEncoder:
         self._choice["text"] = text
         self._choice["finish_reason"] = finish
         self._chunk.pop("usage", None)
-        return sse_frame("", orjson.dumps(self._chunk).decode())
+        return sse_frame("", orjson.dumps(self._chunk))
 
     def feed(self, d: dl.IRStreamDelta) -> bytes | None:
         if isinstance(d, dl.StreamStart):
@@ -203,11 +203,11 @@ class CompletionStreamEncoder:
             # Error frame only: connection close terminates the stream, same as
             # the chat/anthropic/responses encoders. The classification is
             # shared with those surfaces rather than flattened to ``api_error``
-            # — the sync ``error_body`` beside this encoder emits the same
-            # etype verbatim (AUDIT #478).
+            # — the chat dialect's ``error_body`` emits the same etype
+            # verbatim (AUDIT #478).
             etype = dl.stream_error_type(d)
             err = {"error": {"message": d.message, "type": etype, "code": etype}}
-            return sse_frame("", orjson.dumps(err).decode())
+            return sse_frame("", orjson.dumps(err))
         return None  # ThinkingDelta, ServerToolResultDelta, StreamEnd: nothing to send
 
     def explain(self) -> str:
@@ -240,10 +240,5 @@ class CompletionStreamEncoder:
                 "usage": {"prompt_tokens": prompt_incl,
                           "completion_tokens": u.output,
                           "total_tokens": prompt_incl + u.output},
-            }).decode())
+            }))
         return out
-
-
-def error_body(status: int, etype: str, message: str) -> dict[str, Any]:
-    """OpenAI-shaped error envelope (identical to the chat dialect's)."""
-    return {"error": {"message": message, "type": etype, "code": etype}}

@@ -178,7 +178,7 @@ def _role_parts_to_content(
                     "function": {"name": p.name,
                                  # ``args`` is the repaired/validated IR. Replaying the
                                  # original raw text can resend truncated JSON upstream.
-                                 "arguments": json.dumps(p.args)},
+                                 "arguments": orjson.dumps(p.args).decode()},
                 })
             elif isinstance(p, ir.ThinkingPart):
                 if p.block_type == "redacted_thinking":
@@ -471,7 +471,7 @@ class OpenAIAdapter(WarningMixin):
             # accepts. Dropping them silently made a tool that arrived with
             # worked examples look identical to one without.
             if t.input_examples:
-                rendered = json.dumps(t.input_examples, ensure_ascii=False)
+                rendered = orjson.dumps(t.input_examples).decode()
                 fn["description"] = (
                     f"{t.description}\n\nExample inputs:\n{rendered}"
                     if t.description else f"Example inputs:\n{rendered}")
@@ -519,26 +519,26 @@ class OpenAIAdapter(WarningMixin):
             raw_args = fn_tc.get("arguments")
             if isinstance(raw_args, dict):
                 # Args-as-object gateways: use the dict directly instead of
-                # json.loads(TypeError) — a 500 on every replayed history.
+                # orjson.loads(TypeError) — a 500 on every replayed history.
                 args = raw_args
-                raw_args = json.dumps(raw_args)
+                raw_args = orjson.dumps(raw_args).decode()
             else:
                 if not isinstance(raw_args, str):
                     # A truthy scalar (`true`, `5`) reaches here and
-                    # ``json.loads`` raises TypeError — not JSONDecodeError —
+                    # ``orjson.loads`` raises TypeError — not JSONDecodeError —
                     # which the handler below does not catch, so the whole
                     # 200 response failed to decode (AUDIT #124). Treat any
                     # non-string as unparseable args.
                     raw_args = ""
                 raw_args = raw_args or "{}"
                 try:
-                    args = json.loads(raw_args)
-                except json.JSONDecodeError:
+                    args = orjson.loads(raw_args)
+                except ValueError:
                     # Auto-repair truncated JSON instead of dropping to {}.
                     from wiwi.streaming.partial_json import _repair_truncated_json
                     try:
-                        args = json.loads(_repair_truncated_json(raw_args))
-                    except json.JSONDecodeError:
+                        args = orjson.loads(_repair_truncated_json(raw_args))
+                    except ValueError:
                         args = {}
                 if not isinstance(args, dict):
                     args = {}

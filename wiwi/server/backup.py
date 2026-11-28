@@ -131,7 +131,7 @@ BODY_COLUMNS = ("request_body", "response_body")
 #: the day it is added instead of the day someone remembers — BUT the rule has
 #: to name EVERY provider, and it did not (AUDIT #509). It listed only
 #: ``cline_oauth:``, so the Hermes record — stored under
-#: ``hermes_oauth:<provider>`` (``wiwi/server/app.py``'s
+#: ``hermes_oauth:<provider>`` (``wiwi/server/routers/hermes_oauth.py``'s
 #: ``_hermes_oauth_setting_key``) — was written into a no-secrets export with
 #: its refresh token and access token in clear text, while the console told
 #: the operator the file "carry[s] no secrets".

@@ -1214,7 +1214,7 @@ def _encode_responses_request(req: ir.Request, model_id: str,
                     continue
                 input_items.append({"type": "function_call",
                                     "call_id": p.id, "name": p.name,
-                                    "arguments": json.dumps(p.args)})
+                                    "arguments": orjson.dumps(p.args).decode()})
             elif isinstance(p, ir.ToolResultPart):
                 if p.block_type != "tool_result":
                     # Provider-executed result: fold the payload into the
@@ -1307,7 +1307,7 @@ def _encode_responses_request(req: ir.Request, model_id: str,
             # description so a tool that arrived with worked examples is not
             # indistinguishable from one without.
             if t.input_examples:
-                rendered = json.dumps(t.input_examples, ensure_ascii=False)
+                rendered = orjson.dumps(t.input_examples).decode()
                 fn["description"] = (
                     f"{t.description}\n\nExample inputs:\n{rendered}"
                     if t.description else f"Example inputs:\n{rendered}")
@@ -1367,8 +1367,8 @@ def _decode_responses_response(body: bytes) -> ir.AssistantTurn:
         elif itype == "function_call":
             raw_args = item.get("arguments") or "{}"
             try:
-                args = json.loads(raw_args) if isinstance(raw_args, str) else {}
-            except json.JSONDecodeError:
+                args = orjson.loads(raw_args) if isinstance(raw_args, str) else {}
+            except ValueError:
                 args = {}
             turn.tool_calls.append(ir.ToolUsePart(
                 id=str(item.get("call_id") or item.get("id") or ""),

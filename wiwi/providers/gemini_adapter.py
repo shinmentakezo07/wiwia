@@ -248,8 +248,7 @@ class GeminiAdapter(WarningMixin):
                         parts.append({"text": p.content})
                         continue
                     try:
-                        import json as _j
-                        resp = _j.loads(p.content)
+                        resp = orjson.loads(p.content)
                     except (TypeError, ValueError):
                         resp = {"result": p.content}
                     fname = (tool_names.get(p.tool_use_id)
@@ -350,7 +349,7 @@ class GeminiAdapter(WarningMixin):
                     # schema to the model — render into the description, the
                     # same carrier the OpenAI adapter uses. Dropping them
                     # silently lost them only on this route.
-                    rendered = json.dumps(t.input_examples, ensure_ascii=False)
+                    rendered = orjson.dumps(t.input_examples).decode()
                     desc = (f"{t.description}\n\nExample inputs:\n{rendered}"
                             if t.description else f"Example inputs:\n{rendered}")
                 decls.append({"name": t.name, "description": desc,
@@ -599,7 +598,7 @@ class GeminiAdapter(WarningMixin):
                 out.append(dl.ToolCallOpen(
                     index=n, id=_synthetic_tool_id(fname), name=fname))
                 out.append(dl.ToolCallArgsDelta(index=n,
-                                                args_fragment=json.dumps(fc.get("args") or {})))
+                                                args_fragment=orjson.dumps(fc.get("args") or {}).decode()))
                 out.append(dl.ToolCallClose(index=n))
         if block_reason:
             # The prompt-level block terminates the turn with ``content_filter``

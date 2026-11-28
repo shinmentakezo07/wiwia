@@ -124,7 +124,7 @@ class OpenRouterAdapter(OpenAIAdapter):
             # Anthropic's worked examples have no OpenRouter field; render them
             # into the description (see the OpenAI adapter for the rationale).
             if t.input_examples:
-                rendered = json.dumps(t.input_examples, ensure_ascii=False)
+                rendered = orjson.dumps(t.input_examples).decode()
                 fn["description"] = (
                     f"{t.description}\n\nExample inputs:\n{rendered}"
                     if t.description else f"Example inputs:\n{rendered}")
@@ -292,17 +292,17 @@ class OpenRouterAdapter(OpenAIAdapter):
             raw_args = fn.get("arguments") or "{}"
             if isinstance(raw_args, dict):
                 args = raw_args
-                raw_args = json.dumps(raw_args)
+                raw_args = orjson.dumps(raw_args).decode()
             else:
                 if not isinstance(raw_args, str):
                     raw_args = ""
                 try:
-                    parsed = json.loads(raw_args)
-                except (json.JSONDecodeError, TypeError):
+                    parsed = orjson.loads(raw_args)
+                except (ValueError, TypeError):
                     from wiwi.streaming.partial_json import _repair_truncated_json
                     try:
-                        parsed = json.loads(_repair_truncated_json(raw_args))
-                    except (json.JSONDecodeError, TypeError):
+                        parsed = orjson.loads(_repair_truncated_json(raw_args))
+                    except (ValueError, TypeError):
                         parsed = {}
                 args = parsed if isinstance(parsed, dict) else {}
             turn.tool_calls.append(ir.ToolUsePart(

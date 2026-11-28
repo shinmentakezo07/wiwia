@@ -239,7 +239,6 @@ from wiwi.auth.spend_buffer import SpendBuffer
 from wiwi.auth.users import (
     SESSION_RENEW_AFTER_S,
     SESSION_TTL,
-    UserInfo,
     UserService,
     sign_session,
     verify_session,
@@ -277,7 +276,6 @@ from wiwi.server.dependencies import (
     SYNTHETIC_MASTER_ID,
     ORJSONResponse,
     bearer_token,
-    resolve_current_user,
 )
 from wiwi.server.errors import APIError
 from wiwi.server.errors import render as render_error
@@ -376,8 +374,8 @@ from wiwi.wire import openai_chat as oc
 from wiwi.wire import openai_completions as ocmpl
 from wiwi.wire import openai_responses as orp
 
-# The synthetic master actor (``current_user`` mints it for a master bearer or
-# a master session cookie). Real user ids are "u" + 16 hex, so this value can
+# The synthetic master actor (``resolve_current_user`` mints it for a master
+# bearer or a master session cookie). Real user ids are "u" + 16 hex, so this
 # only ever name the synthetic actor, never a row in ``users``.
 #
 # The definition lives in ``wiwi/server/dependencies.py`` so the routers can
@@ -1241,7 +1239,7 @@ class AppState:
         mk = self.config.general_settings.master_key or ""
         # Fail closed when no secret is configured. Falling back to a hardcoded
         # constant meant anyone could forge an admin session cookie: the secret
-        # is the only thing protecting `current_user()`'s uid == "master" branch.
+        # is the only thing protecting ``resolve_current_user``'s uid == "master"
         session_secret = os.environ.get("WIWI_SESSION_SECRET") or mk
         if not session_secret:
             raise RuntimeError(
@@ -2216,34 +2214,12 @@ def create_app(config: WiwiConfig) -> FastAPI:
         return oc.error_body
 
     # -- session / user resolution ----------------------------------------------
-    # The resolution rules live in ``wiwi/server/dependencies.py`` so the
-    # routers (which are separate modules and cannot see this closure) share
-    # one definition with the inline routes. These three remain as thin
-    # wrappers because the extracted routers take them as factory parameters,
-    # and the "return a response or None" shape is what those call sites are
-    # written against.
-    async def current_user(request: Request) -> UserInfo | None:
-        """Resolve the caller from a signed session cookie OR a bearer master
-        key (back-compat). Returns ``None`` when anonymous or when the session
-        user has been disabled/deleted."""
-        return await resolve_current_user(request, state)
-
-    async def require_user_dep(request: Request) -> ORJSONResponse | None:
-        """401 when the caller is not an authenticated user (nor master)."""
-        if await current_user(request) is None:
-            return _err(401, "authentication_error",
-                        "authentication required", request)
-        return None
-
-    async def require_admin_dep(request: Request) -> ORJSONResponse | None:
-        """401 when anonymous, 403 when authenticated but not an admin."""
-        u = await current_user(request)
-        if u is None:
-            return _err(401, "authentication_error",
-                        "authentication required", request)
-        if u.role != "admin":
-            return _err(403, "permission_error", "admin role required", request)
-        return None
+    # Auth guards are the module-level dependencies in
+    # ``wiwi/server/dependencies.py`` (``CurrentUser`` / ``AdminUser`` via
+    # ``require_user`` / ``require_admin``; ``resolve_current_user`` for the
+    # optional-user sites). The routers import them directly, so no
+    # closure form of them remains here; the inline routes resolve through
+    # ``authenticate``.
 
     # -- error rendering ------------------------------------------------------
 
@@ -2420,6 +2396,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
         # is read — an id must never act as a capability token. Auth here is the
         # same ``authenticate`` the request would run anyway; the object it
         # resolves is reused by the call below.
+        merged_history = False
         if (codec_history is not None and isinstance(body, dict)
                 and body.get("previous_response_id")):
             info0, err0 = await authenticate(request, str(body.get("model") or ""),
@@ -2446,6 +2423,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
             # conversation order is user-then-assistant.
             body = codec_history(body, prev.output.get("output", []),
                                  prev.input_items)
+            merged_history = True
         try:
             ir_req = codec_decode(body)
         except (oc.DialectError, ValueError) as e:
@@ -2453,7 +2431,17 @@ def create_app(config: WiwiConfig) -> FastAPI:
                         span=req_span)
         if _perf:
             _marks["decode"] = time.monotonic()
-        est = len(orjson.dumps(body)) // 4 if isinstance(body, dict) else 0
+        if not isinstance(body, dict):
+            est = 0
+        elif merged_history:
+            # Server-held history was merged into body after arrival: size
+            # what the upstream will actually process.
+            est = len(orjson.dumps(body)) // 4
+        else:
+            # The arrived bytes are Starlette-cached (json_body already read
+            # them), so this measures the request without re-serializing the
+            # parsed body on every call just to estimate its size.
+            est = len(await request.body()) // 4
         info, err_resp = await authenticate(request, ir_req.model, surface,
                                             bearer_token=bearer_token)
         if err_resp:
@@ -3436,7 +3424,7 @@ def create_app(config: WiwiConfig) -> FastAPI:
     # (request logs, per-request metrics, proxy/audit logs, and the SSE
     # stream channel).
     app.include_router(admin_logs_router.make_router(
-        state, json_body=json_body, _err=_err))
+        state, _err=_err))
 
     # -- admin: providers & pools ------------------------------------------------
     # Every /admin/* route (and the SSE channel below) authorizes through the

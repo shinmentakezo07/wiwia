@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from typing import Any
 
@@ -249,15 +248,15 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
             raw_args = fn.get("arguments")
             if isinstance(raw_args, dict):
                 # Some OpenAI-compatible gateways emit the arguments as a
-                # JSON OBJECT, not the spec's string. json.loads would raise
+                # JSON OBJECT, not the spec's string. orjson.loads would raise
                 # TypeError (not JSONDecodeError) — a gateway 500 on replayed
                 # history. Use it directly.
                 args = raw_args
-                raw_args = json.dumps(raw_args)
+                raw_args = orjson.dumps(raw_args).decode()
             else:
                 if not isinstance(raw_args, str):
                     # A truthy scalar (`true`, `5`, `1.5`, `["a"]`) falls in
-                    # here and `json.loads` raises TypeError — not
+                    # here and `orjson.loads` raises TypeError — not
                     # JSONDecodeError — which the handler below does not
                     # catch, so the request 500'd (AUDIT #124). The Responses
                     # codec already defends this (`_load_args`); treat any
@@ -265,12 +264,12 @@ def decode_request(body: dict[str, Any]) -> ir.Request:
                     raw_args = ""
                 raw_args = raw_args or "{}"
                 try:
-                    args = json.loads(raw_args)
-                except json.JSONDecodeError:
+                    args = orjson.loads(raw_args)
+                except ValueError:
                     from wiwi.streaming.partial_json import _repair_truncated_json
                     try:
-                        args = json.loads(_repair_truncated_json(raw_args))
-                    except json.JSONDecodeError:
+                        args = orjson.loads(_repair_truncated_json(raw_args))
+                    except ValueError:
                         args = {}
                 if not isinstance(args, dict):
                     # arguments like `"foo"` or `[]` parse fine but are not
@@ -537,7 +536,7 @@ def encode_response(ctx: RequestContext, turn: ir.AssistantTurn, model: str,
              "function": {"name": t.name,
                           # Never forward original truncated raw_args; ``args`` is
                           # the repaired/validated IR sent to the caller.
-                          "arguments": json.dumps(t.args)}}
+                          "arguments": orjson.dumps(t.args).decode()}}
             for t in tool_calls
         ]
     # Reasoning models emit a separate reasoning_content field; include it
@@ -647,7 +646,7 @@ class ChatStreamEncoder:
         # telling the caller the same logprobs apply to a different token.
         # Each logprobs frame carries its own, so the key is per-frame.
         self._choice.pop("logprobs", None)
-        return sse_frame("", orjson.dumps(self._chunk).decode())
+        return sse_frame("", orjson.dumps(self._chunk))
 
     def _defer(self, kind: str, text: str) -> None:
         """Buffer prose that arrived while a tool call was open.
@@ -701,7 +700,7 @@ class ChatStreamEncoder:
             self._choice["finish_reason"] = None
             self._choice["logprobs"] = d.logprobs
             self._chunk.pop("usage", None)
-            return sse_frame("", orjson.dumps(self._chunk).decode())
+            return sse_frame("", orjson.dumps(self._chunk))
         if isinstance(d, dl.TextDelta):
             if self._open_calls:
                 self._defer("text", d.text)
@@ -801,7 +800,7 @@ class ChatStreamEncoder:
             # being told about for the identical failure (AUDIT #478).
             etype = dl.stream_error_type(d)
             err = {"error": {"message": d.message, "type": etype, "code": etype}}
-            return sse_frame("", orjson.dumps(err).decode())
+            return sse_frame("", orjson.dumps(err))
         return None
 
     def explain(self) -> str:
@@ -849,7 +848,7 @@ class ChatStreamEncoder:
             # Re-base onto `out`: a plain reassignment silently dropped the
             # buffered prose emitted just above.
             self._choice["stop_sequence"] = stop_seq
-            out += sse_frame("", orjson.dumps(self._chunk).decode())
+            out += sse_frame("", orjson.dumps(self._chunk))
         if self._include_usage:
             # OpenAI semantics: usage arrives in a final chunk carrying an
             # EMPTY choices array (after the finish_reason chunk), not in the
@@ -873,7 +872,7 @@ class ChatStreamEncoder:
                     "total_tokens": prompt_incl + u.output,
                     "prompt_tokens_details": {"cached_tokens": u.cached},
                     "completion_tokens_details": {"reasoning_tokens": u.reasoning},
-                }}).decode())
+                }}))
         return out
 
 

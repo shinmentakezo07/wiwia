@@ -178,6 +178,17 @@ def _type_name(value: Any) -> str:
     return type(value).__name__
 
 
+_JSON_TYPE_MAP: dict[str, Any] = {
+    "string": str,
+    "integer": int,
+    "number": (int, float),
+    "boolean": bool,
+    "array": list,
+    "object": dict,
+    "null": type(None),
+}
+
+
 def _check_type(value: Any, expected: Any) -> bool:
     """Check that *value* matches the JSON schema *expected* type.
 
@@ -193,16 +204,7 @@ def _check_type(value: Any, expected: Any) -> bool:
         return any(_check_type(value, member) for member in expected)
     if not isinstance(expected, str):
         return True  # no type / unsupported type form: unconstrained
-    type_map = {
-        "string": str,
-        "integer": int,
-        "number": (int, float),
-        "boolean": bool,
-        "array": list,
-        "object": dict,
-        "null": type(None),
-    }
-    python_type = type_map.get(expected)
+    python_type = _JSON_TYPE_MAP.get(expected)
     if python_type is None:
         return True  # unknown type: skip
     # bool is a subclass of int, so check it separately.

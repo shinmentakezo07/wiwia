@@ -23,8 +23,8 @@ from fastapi import APIRouter, Request
 from wiwi.auth.users import SESSION_TTL, sign_session
 from wiwi.server.dependencies import (
     SYNTHETIC_MASTER_ID,
-    ORJSONResponse,
     CurrentUser,
+    ORJSONResponse,
     app_state,
     client_ip,
     request_is_https,

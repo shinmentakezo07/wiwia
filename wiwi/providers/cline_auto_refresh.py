@@ -380,7 +380,7 @@ class ClineAutoRefresh:
         targets = self._owned_keys(provider, owned)
         for k in targets:
             k.secret = secret
-            # See workbuddy_auto_refresh: a refreshed token is a reset.
+            # See hermes_auto_refresh: a refreshed token is a reset.
             k.recover(force=True)
             try:
                 await self._state.config_store.update_key_secret(
@@ -468,8 +468,9 @@ def refresh_for_provider(state) -> callable:
 async def refresh_key_now(state: AppState, provider: str) -> dict[str, Any]:
     """Operator-triggered rotation — the admin refresh endpoint's entry point.
 
-    Mirrors ``wiwi.providers.workbuddy_auto_refresh.refresh_key_now`` and the
-    Hermes equivalent: the handler must not call
+    Mirrors the Hermes equivalent
+    (:func:`wiwi.providers.hermes_auto_refresh.refresh_key_now`): the handler
+    must not call
     :func:`wiwi.providers.cline_oauth.refresh_token` itself. It used to, and
     that put a fourth refresh path next to the sweeper, the 401 hook and the
     worker's own rotation — with its own no-lock, no-circuit execution. A

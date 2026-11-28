@@ -25,7 +25,7 @@ tool_name_strategy = st.text(min_size=1, max_size=50, alphabet=st.characters(
 
 json_value_strategy = st.one_of(
     st.text(max_size=100),
-    st.integers(),
+    st.integers(-(2**63), 2**63 - 1),
     st.floats(allow_nan=False, allow_infinity=False),
     st.booleans(),
     st.none(),
@@ -66,7 +66,7 @@ gen_params_strategy = st.builds(
     top_p=st.one_of(st.none(), st.floats(min_value=0, max_value=1)),
     max_tokens=st.one_of(st.none(), st.integers(min_value=1, max_value=100000)),
     stop=st.lists(st.text(max_size=20), max_size=4),
-    seed=st.one_of(st.none(), st.integers()),
+    seed=st.one_of(st.none(), st.integers(-(2**63), 2**63 - 1)),
     reasoning_effort=st.one_of(st.none(), effort_strategy),
     thinking_budget=st.one_of(st.none(), st.integers(min_value=1024, max_value=64000)),
 )

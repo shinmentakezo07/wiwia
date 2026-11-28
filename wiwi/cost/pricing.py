@@ -238,22 +238,6 @@ _MODEL_ENCODING: dict[str, str] = {
 }
 
 
-def estimate_image_tokens(width: int, height: int) -> int:
-    """Tokens Anthropic bills for an image of *width* x *height*.
-
-    Anthropic's formula: resize so the long edge is at most 1568px, then
-    ``(w * h) / 750``. Used when only the pixel dimensions are known.
-    """
-    if width <= 0 or height <= 0:
-        return 0
-    long_edge = max(width, height)
-    if long_edge > 1568:
-        scale = 1568 / long_edge
-        width = max(1, int(width * scale))
-        height = max(1, int(height * scale))
-    return max(1, (width * height) // 750)
-
-
 def estimate_media_tokens(payload_bytes: int, mime: str = "") -> int:
     """Approximate the prompt tokens an image or document payload costs.
 

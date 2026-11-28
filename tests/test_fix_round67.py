@@ -467,7 +467,7 @@ def test_input_examples_ride_the_description_on_openai_wire():
     fn = OpenAIAdapter().encode_request(
         req, "gpt-x", {"provider_type": "openai"})["tools"][0]["function"]
     assert fn["description"].startswith("Get weather")
-    assert json.dumps(examples) in fn["description"]
+    assert orjson.dumps(examples).decode() in fn["description"]
 
 
 def test_input_examples_still_native_on_anthropic():

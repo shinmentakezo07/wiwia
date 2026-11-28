@@ -229,7 +229,7 @@ class NimAdapter(OpenAIAdapter):
                         turn.tool_calls.append(ir.ToolUsePart(
                             id=f"call_nim_resp_{c.index}",
                             name=c.name, args=c.arguments,
-                            raw_args=json.dumps(c.arguments)))
+                            raw_args=orjson.dumps(c.arguments).decode()))
 
         # Un-alias structured tool_calls args (e.g. a param named "type"
         # sent upstream as "_nim_arg_type") when the request used aliases.
@@ -577,8 +577,7 @@ class NimAdapter(OpenAIAdapter):
         try:
             args = orjson.loads(buf)
             if isinstance(args, dict):
-                fragment = json.dumps(unalias_nim_tool_args(args, aliases),
-                                      ensure_ascii=False, separators=(",", ":"))
+                fragment = orjson.dumps(unalias_nim_tool_args(args, aliases)).decode()
         except (ValueError, json.JSONDecodeError):
             pass  # leave the raw fragment as-is
         out.append(dl.ToolCallArgsDelta(index=idx, args_fragment=fragment))
@@ -591,8 +590,7 @@ class NimAdapter(OpenAIAdapter):
             aliases = self._tool_aliases.get(tc.name)
             if aliases and isinstance(tc.args, dict):
                 tc.args = unalias_nim_tool_args(tc.args, aliases)
-                tc.raw_args = json.dumps(tc.args, ensure_ascii=False,
-                                         separators=(",", ":"))
+                tc.raw_args = orjson.dumps(tc.args).decode()
 
     def _flush_framers(self) -> list[dl.IRStreamDelta]:
         """Flush pending text from both framers and emit any complete tool block."""

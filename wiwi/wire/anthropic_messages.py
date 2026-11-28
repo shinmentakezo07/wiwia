@@ -814,7 +814,7 @@ class AnthropicStreamEncoder:
             "delta": {"type": "input_json_delta", "partial_json": ""}}
 
     def _evt(self, event: str, payload: dict[str, Any]) -> bytes:
-        return sse_frame(event, orjson.dumps(payload).decode())
+        return sse_frame(event, orjson.dumps(payload))
 
     def _close_block(self, tool_index: int | None = None) -> list[bytes]:
         """Close the currently open block, or a specific tool by IR index."""

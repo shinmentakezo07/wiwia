@@ -90,9 +90,15 @@ class SSEBroadcastSink:
             seq = self._seq
             self._rings[stream].append((seq, ring_evt))
             subs = list(self._subs[stream])
+        # Encode ONCE per published event: the frame (asdict + orjson) is
+        # identical for every subscriber, so encoding inside each client's
+        # render loop did the same work N times for N connected consoles.
+        # Subscribers receive (seq, stream, frame) and yield the bytes as-is;
+        # replay() still returns (seq, event) for the ring-replay path.
+        frame = encode_sse(seq, ring_evt)
         for q in subs:
             try:
-                q.put_nowait((seq, ring_evt))
+                q.put_nowait((seq, ring_evt.stream, frame))
             except asyncio.QueueFull:
                 pass  # slow admin client: drop rather than backpressure the gateway
 

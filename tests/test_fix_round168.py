@@ -106,8 +106,8 @@ async def test_list_returns_the_keys_array(client):
     r = await client.get("/admin/keys", headers=AUTH)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert set(body) == {"keys"}
-    assert isinstance(body["keys"], list)
+    assert set(body) == {"keys", "priority_lanes"}
+    assert isinstance(body["priority_lanes"], list)
     assert any(k["alias"] == "k1" for k in body["keys"])
 
 

@@ -29,8 +29,6 @@ from wiwi.server.schemas.admin_keys import (
 )
 from wiwi.server.services.key_admin import KeyAdminService
 
-router = APIRouter(prefix="/admin/keys", tags=["admin-keys"])
-
 
 def make_router(service: KeyAdminService) -> APIRouter:
     """Build the router bound to *service*.
@@ -55,7 +53,8 @@ def make_router(service: KeyAdminService) -> APIRouter:
              response_model_exclude_unset=True)
     async def admin_list_keys(actor: CurrentUser):
         """List the keys the caller may see."""
-        return KeyListResponse(keys=await service.list(actor))
+        return KeyListResponse(keys=await service.list(actor),
+                               priority_lanes=service.priority_lanes)
 
     @api.delete("/{key_id}", response_model=KeyDeleteResponse)
     async def admin_delete_key(key_id: str, actor: CurrentUser):

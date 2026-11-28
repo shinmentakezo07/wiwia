@@ -393,7 +393,7 @@ def test_gemini_renders_input_examples_into_description():
                      tools=[ir.Tool(name="t", input_examples=[{"q": 1}])])
     body = a.encode_request(req, "gem-2.5", {})
     desc = body["tools"][0]["functionDeclarations"][0]["description"]
-    assert "Example inputs" in desc and '"q": 1' in desc
+    assert "Example inputs" in desc and '"q":1' in desc
 
 
 def test_gemini_records_usage_convention():

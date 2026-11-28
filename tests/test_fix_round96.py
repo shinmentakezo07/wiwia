@@ -87,7 +87,6 @@ def test_truncated_openrouter_response_round_trips_valid_arguments():
         replay, "stealth/ox-alpha", {"provider_type": "openrouter"})
 
     call = outbound["messages"][1]["tool_calls"][0]
-    assert call["function"]["arguments"] == '{"path": "/tmp/notes.txt"}'
     assert json.loads(call["function"]["arguments"]) == {"path": "/tmp/notes.txt"}
 
 
