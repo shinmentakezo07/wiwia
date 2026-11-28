@@ -3,7 +3,7 @@
 // strip, FAQ accordion, enterprise CTA, and final CTA. All in wiwi's dark
 // design system.
 
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { Link } from "react-router-dom";
 import {
   ArrowRight,
@@ -63,7 +63,7 @@ const features: { icon: React.ReactNode; title: string; description: string; slu
       </svg>
     ),
     title: "Multi-provider Support",
-    description: "Reach thirteen provider types through one integration — no vendor lock-in, switch models instantly.",
+    description: "Reach twelve provider types through one integration — no vendor lock-in, switch models instantly.",
     slug: "multi-provider-support",
   },
   {
@@ -480,11 +480,22 @@ function CodeTabs() {
   );
 }
 
-function CheckIcon({ yes }: { yes: boolean }) {
-  return yes ? (
-    <Check size={14} className="text-emerald-400" />
-  ) : (
-    <Minus size={14} className="text-[var(--admin-text-dim)]" />
+function CheckIcon({ yes, strong = false }: { yes: boolean; strong?: boolean }) {
+  return (
+    <span className="inline-flex items-center justify-center">
+      {yes ? (
+        <span
+          className={`cmp-tick inline-flex h-6 w-6 items-center justify-center rounded-full ${
+            strong ? "bg-blue-500/15 text-blue-300 ring-1 ring-blue-400/30" : "bg-emerald-500/10 text-emerald-400"
+          }`}
+        >
+          <Check size={13} strokeWidth={2.5} aria-hidden />
+        </span>
+      ) : (
+        <Minus size={14} className="text-[var(--admin-text-dim)] opacity-60" aria-hidden />
+      )}
+      <span className="sr-only">{yes ? "Yes" : "No"}</span>
+    </span>
   );
 }
 
@@ -816,36 +827,102 @@ See pricing and support <ArrowRight size={14} />
 
       {/* ══ comparison table ══ */}
       <section className="scroll-reveal">
-        <div className="mb-8">
-          <span className="admin-label mb-3 block">Compare</span>
-          <h2 className="text-3xl font-semibold tracking-[-0.01em] text-[var(--admin-text)] sm:text-4xl">
-            How wiwi compares
-          </h2>
+        <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <span className="admin-label mb-3 block">Compare</span>
+            <h2 className="text-3xl font-semibold tracking-[-0.01em] text-[var(--admin-text)] sm:text-4xl">
+              How wiwi compares
+            </h2>
+            <p className="mt-3 max-w-xl text-[14px] text-[var(--admin-text-muted)]">
+              The only gateway that speaks all three client dialects, runs on your hardware, and never marks up a token.
+            </p>
+          </div>
+          <div className="flex items-center gap-4 font-mono text-[11px] uppercase tracking-wider text-[var(--admin-text-dim)]">
+            <span className="inline-flex items-center gap-1.5"><Check size={12} className="text-emerald-400" aria-hidden /> Supported</span>
+            <span className="inline-flex items-center gap-1.5"><Minus size={12} aria-hidden /> Not offered</span>
+          </div>
         </div>
         <Card className="overflow-x-auto p-0">
-          <table className="w-full text-left text-[13px]">
+          <table className="w-full min-w-[560px] border-separate border-spacing-0 text-left text-[13px]">
+            <caption className="sr-only">Feature comparison of wiwi, OpenRouter, LiteLLM and Portkey</caption>
             <thead>
-              <tr className="border-b border-[var(--admin-border)]">
-                <th className="px-5 py-3.5 font-semibold text-[var(--admin-text)]">Feature</th>
-                <th className="px-5 py-3.5 text-center font-semibold text-blue-400">wiwi</th>
-                <th className="px-5 py-3.5 text-center font-medium text-[var(--admin-text-dim)]">OpenRouter</th>
-                <th className="px-5 py-3.5 text-center font-medium text-[var(--admin-text-dim)]">LiteLLM</th>
-                <th className="px-5 py-3.5 text-center font-medium text-[var(--admin-text-dim)]">Portkey</th>
+              <tr>
+                <th scope="col" className="sticky left-0 z-10 border-b border-[var(--admin-border)] bg-[var(--admin-surface)] px-5 py-4 font-mono text-[11px] font-medium uppercase tracking-wider text-[var(--admin-text-dim)]">Feature</th>
+                <th scope="col" className="border-b border-blue-400/30 bg-blue-500/[0.06] px-5 py-4 text-center">
+                  <span className="text-[14px] font-semibold text-blue-300">wiwi</span>
+                  <span className="mt-0.5 block font-mono text-[10px] font-normal uppercase tracking-wider text-blue-300/60">
+                    {COMPARISON.filter((r) => r.wiwi).length}/{COMPARISON.length}
+                  </span>
+                  <span aria-hidden className="mx-auto mt-2 block h-[3px] w-14 overflow-hidden rounded-full bg-blue-400/10">
+                    <span
+                      className="cmp-meter-fill block h-full rounded-full bg-blue-400"
+                      style={{ "--cmp-score": COMPARISON.filter((r) => r.wiwi).length / COMPARISON.length } as CSSProperties}
+                    />
+                  </span>
+                </th>
+                {(["openrouter", "litellm", "portkey"] as const).map((k) => (
+                  <th key={k} scope="col" className="border-b border-[var(--admin-border)] px-5 py-4 text-center">
+                    <span className="text-[13px] font-medium text-[var(--admin-text-muted)]">
+                      {{ openrouter: "OpenRouter", litellm: "LiteLLM", portkey: "Portkey" }[k]}
+                    </span>
+                    <span className="mt-0.5 block font-mono text-[10px] font-normal uppercase tracking-wider text-[var(--admin-text-dim)]">
+                      {COMPARISON.filter((r) => r[k]).length}/{COMPARISON.length}
+                    </span>
+                    <span aria-hidden className="mx-auto mt-2 block h-[3px] w-14 overflow-hidden rounded-full bg-white/[0.05]">
+                      <span
+                        className="cmp-meter-fill block h-full rounded-full bg-[var(--admin-text-dim)]"
+                        style={{ "--cmp-score": COMPARISON.filter((r) => r[k]).length / COMPARISON.length } as CSSProperties}
+                      />
+                    </span>
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
-              {COMPARISON.map((row) => (
-                <tr key={row.feature} className="border-b border-[var(--admin-border)] last:border-0">
-                  <td className="px-5 py-3 text-[var(--admin-text-muted)]">{row.feature}</td>
-                  <td className="px-5 py-3 text-center"><CheckIcon yes={row.wiwi} /></td>
-                  <td className="px-5 py-3 text-center"><CheckIcon yes={row.openrouter} /></td>
-                  <td className="px-5 py-3 text-center"><CheckIcon yes={row.litellm} /></td>
-                  <td className="px-5 py-3 text-center"><CheckIcon yes={row.portkey} /></td>
-                </tr>
-              ))}
+              {(() => {
+                // Rank rows by how many rivals share the feature: what sets wiwi
+                // apart leads, table stakes trail. Derived from data, not curated.
+                const rivals = (r: (typeof COMPARISON)[number]) =>
+                  [r.openrouter, r.litellm, r.portkey].filter(Boolean).length;
+                const rows = [...COMPARISON].sort((a, b) => rivals(a) - rivals(b));
+                const firstStake = rows.findIndex((r) => rivals(r) === 3);
+                return rows.map((row, i) => {
+                  const last = i === rows.length - 1;
+                  const n = rivals(row);
+                  const cell = last ? "" : "border-b border-[var(--admin-border)]";
+                  const group =
+                    i === 0 || i === firstStake ? (
+                      <tr key={`g-${i}`} aria-hidden>
+                        <td colSpan={5} className={`px-5 pb-2 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--admin-text-dim)] ${i === 0 ? "pt-5" : "border-t border-[var(--admin-border)] pt-6"}`}>
+                          {i === 0 ? "Where it differs" : "Table stakes — everyone ships these"}
+                        </td>
+                      </tr>
+                    ) : null;
+                  const stake = n === 3;
+                  return [
+                    group,
+                    <tr key={row.feature} className="cmp-row transition-colors hover:bg-white/[0.02]">
+                      <th scope="row" className={`sticky left-0 z-10 bg-[var(--admin-surface)] px-5 py-3.5 font-normal ${cell}`}>
+                        <span className="flex items-center gap-3">
+                          <span className="font-mono text-[10px] tabular-nums text-[var(--admin-text-dim)]">{String(i + 1).padStart(2, "0")}</span>
+                          <span className={stake ? "text-[var(--admin-text-muted)]" : "text-[var(--admin-text)]"}>{row.feature}</span>
+                          {n === 0 && (
+                            <span className="rounded border border-blue-400/30 px-1.5 py-px font-mono text-[9px] uppercase tracking-wider text-blue-300">only wiwi</span>
+                          )}
+                        </span>
+                      </th>
+                      <td className={`bg-blue-500/[0.06] px-5 py-3.5 text-center ${last ? "" : "border-b border-blue-400/10"}`}><CheckIcon yes={row.wiwi} strong={!stake} /></td>
+                      <td className={`px-5 py-3.5 text-center ${cell}`}><CheckIcon yes={row.openrouter} /></td>
+                      <td className={`px-5 py-3.5 text-center ${cell}`}><CheckIcon yes={row.litellm} /></td>
+                      <td className={`px-5 py-3.5 text-center ${cell}`}><CheckIcon yes={row.portkey} /></td>
+                    </tr>,
+                  ];
+                });
+              })()}
             </tbody>
           </table>
         </Card>
+        <p className="mt-3 text-[12px] text-[var(--admin-text-dim)] sm:hidden">Swipe the table sideways to see every gateway.</p>
       </section>
 
       {/* ══ FAQ ══ */}

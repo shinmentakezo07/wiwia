@@ -38,7 +38,10 @@ import {
   AlertTriangle,
   Boxes,
   ChevronDown,
+  Copy,
   Layers,
+  Sparkles,
+  Zap,
   Pencil,
   Plus,
   RefreshCw,
@@ -64,6 +67,7 @@ import {
   ErrorText,
   Field,
   Figure,
+  IconButton,
   Input,
   PageHeader,
   ProgressBar,
@@ -79,6 +83,12 @@ import {
   providerWeightSplit,
   routableDeployments,
 } from "@/lib/deployment-health";
+import {
+  matchAcrossProviders,
+  pickSplit,
+  suggestComboName,
+  uniqueName,
+} from "@/lib/combo-compose";
 import { fmtInt } from "@/lib/format";
 import { providerHue } from "@/lib/provider-hue";
 
@@ -98,7 +108,17 @@ interface ProviderOption {
 interface DeploymentPick {
   provider: string;
   model_id: string;
+  /** Round-robin weight to attach with; defaults to 1. */
+  weight?: number;
 }
+
+/** Create-mode seed (the "Duplicate combo" action). */
+interface ComboPrefill {
+  name: string;
+  picks: DeploymentPick[];
+}
+
+const pickWeight = (p: DeploymentPick) => Math.max(1, p.weight ?? 1);
 
 // Trade a provider name + model id for a stable, printable selection key. The
 // pair lives in the Map value, so we never need to split the key — it only
@@ -148,6 +168,8 @@ function ComboDialog(props: {
   // otherwise *merge* the ticked models into the existing combo and report
   // success, which silently edits a routing group the operator did not open.
   existingNames: string[];
+  // Create-mode seed (Duplicate combo). Ignored in edit mode.
+  prefill?: ComboPrefill | null;
   onClose: () => void;
   onSaved: (name: string) => void;
 }) {
@@ -265,7 +287,7 @@ function ComboDialog(props: {
         new Map(
           props.editing.deployments.map((d) => [
             depKey(d),
-            { provider: d.provider, model_id: d.model_id },
+            { provider: d.provider, model_id: d.model_id, weight: Math.max(1, d.weight) },
           ]),
         ),
       );
@@ -274,6 +296,10 @@ function ComboDialog(props: {
           props.editing!.deployments.some((d) => d.provider === p.name),
         )?.name ?? null,
       );
+    } else if (props.prefill) {
+      setName(props.prefill.name);
+      setSelected(new Map(props.prefill.picks.map((p) => [depKey(p), { ...p }])));
+      setActiveProvider(props.prefill.picks[0]?.provider ?? null);
     } else {
       setName("");
       setSelected(new Map());
@@ -281,9 +307,70 @@ function ComboDialog(props: {
     }
     setSearch("");
     setCustomDraft("");
-    setTrayOpen(false);
+    setTrayOpen(true);
     setLocalError(null);
-  }, [props.open, props.editing]);
+    // `prefill` is page state set alongside `open`, not query data, so it
+    // cannot be swapped by a background refetch.
+  }, [props.open, props.editing, props.prefill]);
+
+  const setPickWeight = (k: string, w: number) =>
+    setSelected((s) => {
+      const cur = s.get(k);
+      if (!cur) return s;
+      const n = new Map(s);
+      n.set(k, { ...cur, weight: Math.max(1, Math.floor(w) || 1) });
+      return n;
+    });
+
+  // "Same model everywhere": the best match for the search in every provider.
+  const crossMatches = useMemo(
+    () =>
+      matchAcrossProviders(
+        search,
+        Object.fromEntries(props.providerOptions.map((p) => [p.name, modelsFor(p.name)])),
+        props.providerOptions.map((p) => p.name),
+      ),
+    [search, props.providerOptions, modelsFor],
+  );
+  const crossUnpicked = crossMatches.filter((m) => !selected.has(depKey(m)));
+  const addAllMatches = () =>
+    setSelected((s) => {
+      const n = new Map(s);
+      for (const m of crossMatches) {
+        const k = depKey(m);
+        if (!n.has(k)) n.set(k, { provider: m.provider, model_id: m.model_id, weight: 1 });
+      }
+      return n;
+    });
+
+  const suggestedName = useMemo(
+    () =>
+      isEdit || name.trim() || selected.size === 0
+        ? null
+        : suggestComboName(
+            Array.from(selected.values()).map((s) => s.model_id),
+            props.existingNames,
+          ),
+    [isEdit, name, selected, props.existingNames],
+  );
+  const previewSplit = useMemo(
+    () =>
+      pickSplit(
+        Array.from(selected.values()).map((s) => ({ provider: s.provider, weight: pickWeight(s) })),
+      ),
+    [selected],
+  );
+  // Weight changes on already-attached picks count as edits too.
+  const reweighted = useMemo(() => {
+    const orig = new Map(
+      (props.editing?.deployments ?? []).map((d) => [depKey(d), Math.max(1, d.weight)]),
+    );
+    return Array.from(selected.values()).filter((s) => {
+      const w = orig.get(depKey(s));
+      return w !== undefined && w !== pickWeight(s);
+    });
+  }, [selected, props.editing]);
+  const searchRef = useRef<HTMLInputElement | null>(null);
 
   const toggle = (p: DeploymentPick) =>
     setSelected((s) => {
@@ -292,7 +379,7 @@ function ComboDialog(props: {
       if (n.has(k)) {
         n.delete(k);
       } else {
-        n.set(k, p);
+        n.set(k, { ...p, weight: p.weight ?? 1 });
       }
       return n;
     });
@@ -370,7 +457,7 @@ function ComboDialog(props: {
   };
 
   const gname = name.trim();
-  const noopEdit = isEdit && added === 0 && removed === 0;
+  const noopEdit = isEdit && added === 0 && removed === 0 && reweighted.length === 0;
 
   const save = useMutation({
     mutationFn: async () => {
@@ -391,7 +478,21 @@ function ComboDialog(props: {
       const attached = new Set(props.editing?.deployments.map(depKey) ?? []);
       for (const e of entries) {
         if (attached.has(depKey(e))) continue;
-        await addDeployment(gname, { provider: e.provider, model_id: e.model_id, weight: 1 });
+        try {
+          await addDeployment(gname, {
+            provider: e.provider,
+            model_id: e.model_id,
+            weight: pickWeight(e),
+          });
+        } catch (err) {
+          // 409 = already attached (raced another tab) — not a failure.
+          if ((err as { status?: number }).status !== 409) throw err;
+        }
+      }
+      if (isEdit && reweighted.length > 0) {
+        await patchModelGroup(gname, {
+          weights: Object.fromEntries(reweighted.map((r) => [depKey(r), pickWeight(r)])),
+        });
       }
       if (isEdit) {
         // Detach the ones that were there but are no longer ticked.
@@ -465,10 +566,15 @@ function ComboDialog(props: {
                 cross-provider RR
               </Badge>
             )}
-            {isEdit && (added > 0 || removed > 0) && (
+            {isEdit && (added > 0 || removed > 0 || reweighted.length > 0) && (
               <span className="flex items-center gap-1.5">
                 {added > 0 && <Badge tone="green">+{added}</Badge>}
                 {removed > 0 && <Badge tone="red">−{removed}</Badge>}
+                {reweighted.length > 0 && (
+                  <Badge tone="amber" title="Weight changes on attached deployments">
+                    ~{reweighted.length} weight
+                  </Badge>
+                )}
               </span>
             )}
           </div>
@@ -507,9 +613,31 @@ function ComboDialog(props: {
             value={name}
             placeholder="e.g. shin"
             onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              // Step 1 → step 2: Enter moves on to picking models.
+              if (e.key === "Enter") {
+                e.preventDefault();
+                searchRef.current?.focus();
+              }
+            }}
             disabled={isEdit}
+            className="min-h-11"
           />
         </Field>
+        {suggestedName && (
+          <div className="-mt-1 flex flex-wrap items-center gap-2 text-[11px] text-[var(--admin-text-dim)]">
+            <Sparkles size={12} aria-hidden />
+            <span>Suggested name</span>
+            <button
+              type="button"
+              onClick={() => setName(suggestedName)}
+              aria-label={`Use suggested name ${suggestedName}`}
+              className="inline-flex min-h-11 max-w-full items-center rounded-lg border border-blue-500/25 bg-blue-500/[0.08] px-3 font-mono text-[12px] text-blue-200 transition-colors hover:bg-blue-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+            >
+              <span className="truncate">{suggestedName}</span>
+            </button>
+          </div>
+        )}
 
         {/* search — filters model ids; with a clear button. On a phone it has
             room to breathe, on desktop it spans the detail pane. */}
@@ -519,6 +647,7 @@ function ComboDialog(props: {
             className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--admin-text-dim)]"
           />
           <Input
+            ref={searchRef}
             value={search}
             placeholder="Search model ids… (e.g. gpt, glm, 5.2)"
             aria-label="Search model ids"
@@ -526,16 +655,46 @@ function ComboDialog(props: {
             className="min-h-11 pl-9 pr-14"
           />
           {search && (
-            <button
-              type="button"
-              aria-label="Clear search"
+            <IconButton
+              label="Clear search"
               onClick={() => setSearch("")}
-              className="absolute right-1 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-lg text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.03] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+              className="absolute right-1 top-1/2 -translate-y-1/2"
             >
               <X size={14} />
-            </button>
+            </IconButton>
           )}
         </div>
+
+        {/* "Same model everywhere": the fastest path to a cross-provider combo. */}
+        {searching && crossMatches.length >= 2 && (
+          <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-lg border border-blue-500/20 bg-blue-500/[0.05] px-3 py-1.5">
+            <Zap size={13} aria-hidden className="shrink-0 text-blue-300" />
+            <span className="min-w-0 flex-1 text-[12px] text-[var(--admin-text-muted)]">
+              <span className="font-medium text-[var(--admin-text)]">{crossMatches.length}</span>{" "}
+              providers serve this model
+              <span className="ml-1.5 inline-flex flex-wrap gap-1 align-middle">
+                {crossMatches.map((m) => (
+                  <span
+                    key={depKey(m)}
+                    className="wl-hue"
+                    title={`${m.provider} · ${m.model_id}${m.exact ? "" : " (closest match)"}`}
+                    style={{ backgroundColor: providerHue(m.provider) }}
+                  />
+                ))}
+              </span>
+            </span>
+            <Button
+              variant="outline"
+              onClick={addAllMatches}
+              disabled={crossUnpicked.length === 0}
+              className="min-h-11 shrink-0"
+            >
+              {crossUnpicked.length === 0
+                ? "All added"
+                : `Add from all ${crossMatches.length} providers`}
+            </Button>
+          </div>
+        )}
 
         {/* two panes: provider rail (master) + model list (detail). On a phone
             the rail is a horizontal chip strip above the list. `min-w-0` is
@@ -758,8 +917,31 @@ function ComboDialog(props: {
               aria-expanded={trayOpen}
               className="flex min-h-11 w-full items-center justify-between px-2.5 py-1.5"
             >
-              <span className="admin-label">
-                Selection · <span className="text-blue-300">{selected.size}</span>
+              <span className="flex min-w-0 flex-1 items-center gap-3">
+                <span className="admin-label shrink-0">
+                  Review · <span className="text-blue-300">{selected.size}</span>
+                </span>
+                {/* live routing split the save will produce */}
+                <span
+                  className="wl-split w-24 shrink-0 sm:w-40"
+                  role="img"
+                  aria-label={`Traffic split after save — ${previewSplit
+                    .map((s) => `${s.provider} ${Math.round(s.share * 100)}%`)
+                    .join(", ")}`}
+                >
+                  {previewSplit.map((s) => (
+                    <span
+                      key={s.provider}
+                      title={`${s.provider} — ${Math.round(s.share * 100)}%`}
+                      style={{ width: `${s.share * 100}%`, backgroundColor: providerHue(s.provider) }}
+                    />
+                  ))}
+                </span>
+                <span className="hidden min-w-0 truncate font-mono text-[10px] text-[var(--admin-text-dim)] sm:inline">
+                  {previewSplit
+                    .map((s) => `${s.provider} ${Math.round(s.share * 100)}%`)
+                    .join(" · ")}
+                </span>
               </span>
               <ChevronDown
                 size={13}
@@ -783,6 +965,16 @@ function ComboDialog(props: {
                     <span className="min-w-0 max-w-[46vw] truncate sm:max-w-[220px]">
                       {s.provider}/{s.model_id}
                     </span>
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={pickWeight(s)}
+                      onChange={(e) => setPickWeight(depKey(s), Number(e.target.value))}
+                      aria-label={`Weight for ${s.provider} ${s.model_id}`}
+                      title="Round-robin weight (minimum 1)"
+                      className="admin-input h-11 w-14 shrink-0 px-1 text-center font-mono text-[12px]"
+                    />
                     <button
                       type="button"
                       aria-label={`Remove ${s.model_id} from ${s.provider}`}
@@ -914,6 +1106,7 @@ function ComboDetail(props: {
   error: string | null;
   onError: (m: string) => void;
   onEdit: () => void;
+  onDuplicate: () => void;
   onEmptied: () => void;
 }) {
   const qc = useQueryClient();
@@ -999,6 +1192,14 @@ function ComboDetail(props: {
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" onClick={props.onEdit} className="min-h-11">
             <Pencil size={13} /> Edit
+          </Button>
+          <Button
+            variant="outline"
+            onClick={props.onDuplicate}
+            className="min-h-11"
+            title="Start a new combo with these deployments and weights"
+          >
+            <Copy size={13} /> Duplicate
           </Button>
           <Button
             variant="outline"
@@ -1240,6 +1441,7 @@ export function CombosPage() {
   // `editing` is the model group being edited in the dialog, or null for create.
   const [editingGroup, setEditingGroup] = useState<ModelGroup | null>(null);
   const [comboQuery, setComboQuery] = useState("");
+  const [prefill, setPrefill] = useState<ComboPrefill | null>(null);
 
   // Polled so health (available / inflight / p95) stays live, matching the
   // Models page. The dialog edits a snapshot captured at open time, so
@@ -1328,9 +1530,41 @@ export function CombosPage() {
   // Dialog modes: explicit create, or edit the currently selected combo.
   const openDialog = (mode: "create" | "edit") => {
     setError(null);
+    setPrefill(null);
     setEditingGroup(mode === "edit" ? (groups.find((g) => g.name === selectedName) ?? null) : null);
     setDialogOpen(true);
   };
+
+  // Duplicate: create mode, seeded with the combo's deployments and weights.
+  const openDuplicate = (g: ModelGroup) => {
+    setError(null);
+    setEditingGroup(null);
+    setPrefill({
+      name: uniqueName(`${g.name}-copy`, groups.map((x) => x.name)),
+      picks: g.deployments.map((d) => ({
+        provider: d.provider,
+        model_id: d.model_id,
+        weight: Math.max(1, d.weight),
+      })),
+    });
+    setDialogOpen(true);
+  };
+
+  // "n" opens New combo when the user is not typing somewhere.
+  const openCreateRef = useRef(() => openDialog("create"));
+  openCreateRef.current = () => openDialog("create");
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "n" || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+      if (document.querySelector('[role="dialog"]')) return;
+      e.preventDefault();
+      openCreateRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const existing = groups.find((g) => g.name === selectedName);
   const crossProvider =
@@ -1349,8 +1583,16 @@ export function CombosPage() {
         title="Combos"
         subtitle="Compose named model groups from deployments across providers. A name with 2+ providers round-robins across them."
         right={
-          <Button onClick={() => openDialog("create")} className="min-h-11">
+          <Button
+            onClick={() => openDialog("create")}
+            className="min-h-11"
+            aria-keyshortcuts="n"
+            title="New combo (n)"
+          >
             <Plus size={14} /> New combo
+            <kbd className="ml-1 hidden rounded border border-white/15 px-1 font-mono text-[10px] opacity-70 sm:inline">
+              n
+            </kbd>
           </Button>
         }
       />
@@ -1422,14 +1664,13 @@ export function CombosPage() {
                 className="min-h-11 pl-9 pr-12"
               />
               {comboQuery && (
-                <button
-                  type="button"
-                  aria-label="Clear combo filter"
+                <IconButton
+                  label="Clear combo filter"
                   onClick={() => setComboQuery("")}
-                  className="absolute right-1 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-lg text-[var(--admin-text-dim)] transition-colors hover:bg-white/[0.04] hover:text-[var(--admin-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/50"
+                  className="absolute right-1 top-1/2 -translate-y-1/2"
                 >
                   <X size={14} />
-                </button>
+                </IconButton>
               )}
             </div>
           </div>
@@ -1547,6 +1788,7 @@ export function CombosPage() {
               error={error}
               onError={setError}
               onEdit={() => openDialog("edit")}
+              onDuplicate={() => openDuplicate(existing)}
               onEmptied={() =>
                 setSelectedName(
                   sortedGroups.find((g) => g.name !== existing.name)?.name ?? null,
@@ -1594,6 +1836,7 @@ export function CombosPage() {
         providerOptions={providerOptions}
         registeredByProvider={registeredByProvider}
         existingNames={sortedGroups.map((g) => g.name)}
+        prefill={prefill}
         onSaved={(n) => setSelectedName(n)}
         onClose={() => setDialogOpen(false)}
       />
