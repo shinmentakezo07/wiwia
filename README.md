@@ -26,8 +26,8 @@
 <table>
   <tr>
     <td align="center"><b>3</b><br/><sub>inbound dialects</sub></td>
-    <td align="center"><b>13</b><br/><sub>outbound providers</sub></td>
-    <td align="center"><b>39</b><br/><sub>possible pairings</sub></td>
+    <td align="center"><b>12</b><br/><sub>outbound providers</sub></td>
+    <td align="center"><b>36</b><br/><sub>possible pairings</sub></td>
     <td align="center"><b>1</b><br/><sub>backend: Python/FastAPI</sub></td>
   </tr>
 </table>
@@ -98,8 +98,8 @@ the envelope is OpenAI's.
   </tr>
   <tr>
     <td>
-      <img alt="Hub-and-spoke architecture: three inbound dialects decode into one canonical IR, which the router dispatches to thirteen outbound providers" src="docs/assets/wiwi-hub-spoke.svg" width="100%">
-      <br/><sub>Three codecs in, one IR, thirteen adapters out — adding either side is one module.</sub>
+      <img alt="Hub-and-spoke architecture: three inbound dialects decode into one canonical IR, which the router dispatches to twelve outbound providers" src="docs/assets/wiwi-hub-spoke.svg" width="100%">
+      <br/><sub>Three codecs in, one IR, twelve adapters out — adding either side is one module.</sub>
     </td>
   </tr>
 </table>
@@ -118,7 +118,7 @@ constraint is enforced by an import-time `assert` in the registry, not by conven
 
 | 😩 Problem | 💡 wiwi's answer |
 |---|---|
-| One client dialect, many models behind it | **Hub-and-spoke translation.** Any of 3 inbound dialects ↔ any of 13 outbound provider types. N×M coverage from N+M modules. |
+| One client dialect, many models behind it | **Hub-and-spoke translation.** Any of 3 inbound dialects ↔ any of 12 outbound provider types. N×M coverage from N+M modules. |
 | Rate-limit pain across many keys | **Smooth weighted round-robin** key pools, per-key cooldowns, `failover_mode`, retries. |
 | Reasoning params don't line up | IR collapses `reasoning_effort`, `thinking.budget_tokens`, OpenRouter's `reasoning{}` into one form. Multi-turn survives a mid-conversation model switch. |
 | Want a UI, not just YAML | Built-in dark console at `/console` — keys, providers, pools, live SSE logs, per-request TTFT/TPS/cost. |
@@ -275,10 +275,11 @@ client at `https://<your-domain>/v1`.
 
 | Client | Set this | Then run |
 |---|---|---|
-| 🤖 **Claude Code** | `ANTHROPIC_BASE_URL=http://localhost:4000`<br>`ANTHROPIC_AUTH_TOKEN=sk-wiwi-…` | `claude` |
+| <img src="web/public/logos/clients/claude.svg" width="20" height="20" alt="Claude Code"> **Claude Code** | `ANTHROPIC_BASE_URL=http://localhost:4000`<br>`ANTHROPIC_AUTH_TOKEN=sk-wiwi-…` | `claude` |
 | ⌨️ **Codex CLI** | `OPENAI_BASE_URL=http://localhost:4000/v1` | `codex --model gpt-4o` |
-| 🐍 **openai SDK** | `base_url="http://localhost:4000/v1"`<br>`api_key="sk-wiwi-…"` | `client.chat.completions.create(...)` |
+| <img src="web/public/logos/clients/openai.svg" width="20" height="20" alt="openai SDK"> **openai SDK** | `base_url="http://localhost:4000/v1"`<br>`api_key="sk-wiwi-…"` | `client.chat.completions.create(...)` |
 | 🌐 **curl** | `Authorization: Bearer sk-wiwi-…` | `curl localhost:4000/v1/models` |
+| <img src="web/public/logos/clients/opencode.svg" width="20" height="20" alt="OpenCode"> **OpenCode** | `OPENAI_BASE_URL=http://localhost:4000/v1` | opencode's own OpenAI-compatible provider config |
 
 <details>
 <summary><b>Full snippets</b></summary>
@@ -453,7 +454,7 @@ Four things wiwi does that a config-file gateway doesn't.
 
 ### 🔁 Translation, both directions
 
-- **3 inbound dialects × 13 outbound provider types**, with `drop_params` and `extra_headers` for the awkward edges.
+- **3 inbound dialects × 12 outbound provider types**, with `drop_params` and `extra_headers` for the awkward edges.
 - **Builtin tool translation** — one canonical `web_search`, rendered natively per surface:
 
   | Canonical | Anthropic | Responses | Gemini | OpenRouter | OpenAI Chat |
@@ -617,7 +618,7 @@ because it is the escape hatch — it works with anything behind a URL.</sub>
 
 ### Outbound providers
 
-All 13 types live in `wiwi/config.py:PROVIDER_TYPES`, the single source of truth. The router catalog, admin
+All 12 types live in `wiwi/config.py:PROVIDER_TYPES`, the single source of truth. The router catalog, admin
 validation, and the Pydantic schema all reference it, and import-time `assert`s fail loudly if a type is added
 without a matching adapter.
 
@@ -791,7 +792,7 @@ wiwi_settings:
 </div>
 
 ```
-wiwi/                      ~45k lines of Python across 96 modules (including type stubs)
+wiwi/                      ~44k lines of Python across 108 modules
 ├── main.py                CLI entrypoint (wiwi --config …)
 ├── config.py              YAML → pydantic; env interpolation; PROVIDER_TYPES
 ├── ir/                    Canonical IR: types.py (tagged parts, messages, tools, params) + builtin_tools.py
@@ -809,10 +810,10 @@ web/                       React 19 + TypeScript strict + Vite 6 + Tailwind 4; t
 
 <table>
   <tr>
-    <td align="center"><b>96</b><br/><sub>Python files</sub></td>
-    <td align="center"><b>102</b><br/><sub>TS/TSX files</sub></td>
-    <td align="center"><b>9 + 59</b><br/><sub>method/path pairs: /v1 + /admin</sub></td>
-    <td align="center"><b>4401</b><br/><sub>Python tests passing</sub></td>
+    <td align="center"><b>108</b><br/><sub>Python files</sub></td>
+    <td align="center"><b>100</b><br/><sub>TS/TSX files</sub></td>
+    <td align="center"><b>9 + 54</b><br/><sub>method/path pairs: /v1 + /admin</sub></td>
+    <td align="center"><b>4319</b><br/><sub>Python tests passing</sub></td>
     <td align="center"><b>0</b><br/><sub>ruff findings</sub></td>
   </tr>
 </table>
@@ -887,8 +888,7 @@ than trusting the last line of `ls`.
 > The counts in this README are checked in periodically. Re-derive them with
 > `python3 -m pytest tests/ -q` and `find wiwi -name '*.py' | wc -l`.
 
-Last verified in this checkout: **4401 Python tests passed, 12 skipped**;
-**48 frontend tests passed**; the frontend production build succeeded; Python lint and audit-register lint passed.
+Last verified in this checkout: **4319 Python tests passed, 12 skipped**; Python lint passed.
 CI runs the same Python and web gates in separate jobs.
 
 ---
