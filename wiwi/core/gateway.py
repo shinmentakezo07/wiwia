@@ -626,7 +626,7 @@ class Gateway:
         # should retry; False when no rotation happened (caller surfaces
         # the original 401).
         self._on_demand_cline_refresh = None
-        # On-demand refresh hooks per provider type (e.g. "workbuddy"), set
+        # On-demand refresh hooks per provider type (e.g. "hermes"), set
         # by the app at startup. Cline keeps its legacy attribute above for
         # backward compatibility with existing wiring/tests.
         self._on_demand_refresh_hooks: dict[str, Any] = {}
@@ -1070,7 +1070,7 @@ class Gateway:
         # (AUDIT #228). The pump path only tracks a length, and resume.py
         # already uses this pattern (#104).
         try:
-            # `allow_unframed`: envelope providers (Cline/WorkBuddy) answer a
+            # `allow_unframed`: envelope providers (Cline) answer a
             # "streaming" request with one whole JSON object per line rather
             # than framed SSE, and this arm must see those lines (AUDIT #284).
             # Gated on provider type (round 194): every other provider is
@@ -2273,7 +2273,7 @@ class Gateway:
             grace_deadline: float | None = None  # monotonic deadline for grace drain
             loop_limit = (self.router.settings.stream_loop_limit
                           if self.router.settings.stream_loop_detection else 0)
-            # `allow_unframed`: envelope providers (Cline/WorkBuddy) answer with
+            # `allow_unframed`: envelope providers (Cline) answer with
             # one whole JSON object per line rather than framed SSE; without
             # this every content delta vanished and the client saw an empty
             # turn plus a spurious "ended without completion" (AUDIT #285).

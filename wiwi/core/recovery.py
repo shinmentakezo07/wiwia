@@ -1,6 +1,6 @@
 """Shared recovery primitives: backoff, circuit breakers.
 
-Used by the router retry loop, the Cline/WorkBuddy auto-refresh services, and
+Used by the router retry loop, the Cline auto-refresh service, and
 the HealthHealer background service. Contracts only — no dialect or provider
 branching (invariant: those live in wiwi/wire/ and wiwi/providers/). This
 module must never import wiwi.router or wiwi.core.gateway: they import from
@@ -57,7 +57,7 @@ class CircuitBreaker:
     """Per-target failure streak with exponential backoff and a permanent-dead state.
 
     Replaces the ``{"streak": n, "until": t}`` dict idiom previously duplicated
-    in cline_auto_refresh and workbuddy_auto_refresh (streak >= 99 / until=inf
+    in cline_auto_refresh (streak >= 99 / until=inf
     meant permanently dead; that is ``mark_dead`` here). After a backoff window
     elapses the target is unblocked but its streak persists, so the next trip
     waits longer. Targets must be hashable.
@@ -113,13 +113,13 @@ def probe_verdict(status: int | None, body: bytes | str | None = None,
                   allow_unframed: bool = False) -> ProbeVerdict:
     """Classify a probe HTTP outcome; ``status=None`` means transport failure.
 
-    A 200 is only HEALTHY when its body is a real completion. Some providers
-    (WorkBuddy) ride business errors on HTTP 200 as a ``{"code": N, "msg": …}``
-    envelope — a dead session would otherwise be declared healthy and restored
-    into rotation (AUDIT #96).
+    A 200 is only HEALTHY when its body is a real completion. An envelope
+    provider may ride business errors on HTTP 200 as a ``{"code": N,
+    "msg": …}`` envelope — a dead session would otherwise be declared
+    healthy and restored into rotation (AUDIT #96).
 
     ``allow_unframed`` gates the lenient SSE parser used for envelope
-    providers (Cline/WorkBuddy): without it an error envelope in the
+    providers (Cline): without it an error envelope in the
     one-JSON-object-per-line shape is not classified as an error and the
     key is declared HEALTHY. Every other provider gets the strict parser
     (round 194), so a stray unframed line is never misread as a completion.
@@ -223,7 +223,7 @@ def build_url(adapter, base_url: str, model_id: str, provider_type: str,
               stream: bool, key) -> str:
     """Resolve the upstream URL for a call, appending the credential for
     providers that need it in the querystring (Gemini) and honoring adapter-
-    declared ``build_url_for_key`` (WorkBuddy CN vs global domains). Extracted
+    declared ``build_url_for_key``. Extracted
     verbatim from gateway._build_url so the healer and the gateway share one
     implementation; ``key`` is a ProviderKeyRef."""
     build = getattr(adapter, "build_url_for_key", None)
@@ -298,8 +298,8 @@ class HealthHealer:
     through the adapter seam (fresh_adapter -> encode_request -> build_url ->
     POST) on this service's own short-timeout httpx client — no RequestContext,
     no retries, no rate-limit or billing interaction, no client-request
-    rewriting. Streaming-only upstreams (force_stream adapters: Cline,
-    WorkBuddy) are probed with stream=True; HTTP 200 is the healthy signal in
+    rewriting. Streaming-only upstreams (force_stream adapters: Cline)
+    are probed with stream=True; HTTP 200 is the healthy signal in
     every case (the body is never decoded). A restore puts the target into
     probation; see the design spec for the verdict table. Lifecycle contract
     matches ClineAutoRefresh: start()/stop() around a named, cancellable task.

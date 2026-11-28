@@ -113,7 +113,7 @@ async def iter_sse_lines(chunks: AsyncIterator[bytes],
 def _looks_like_payload(line: str) -> bool:
     """True when a line is a self-contained payload rather than an SSE field.
 
-    The unframed mode exists for the envelope providers (Cline, WorkBuddy),
+    The unframed mode exists for the envelope providers (Cline),
     which answer with one whole JSON object per line. Recognising the shape
     is what keeps that mode from also claiming the SSE *field* lines
     (``id:``, ``retry:``) — a line that starts with a letter is a field, and
@@ -127,8 +127,8 @@ class LineSSEParser:
     """Feed lines from :func:`iter_sse_lines`; yields SSEEvent at blank-line boundaries.
 
     ``allow_unframed`` handles providers that answer a "streaming" request with
-    **one whole JSON object per line** instead of framed SSE — Cline and
-    WorkBuddy do this, and they are streaming-only, so the shape reaches every
+    **one whole JSON object per line** instead of framed SSE — Cline
+    does this, and it is streaming-only, so the shape reaches every
     streaming client. Such a line has no ``data:``/``event:``/``:`` prefix, so
     the strict parser silently discards it; with ``allow_unframed`` it is
     emitted as an immediate data event instead. Off by default, because a strict
