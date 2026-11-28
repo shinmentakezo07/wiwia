@@ -83,3 +83,6 @@ kye
 
 # Separate local checkout, not part of this repo
 workbuddy2api-hub/
+
+# Local agent tooling (machine-specific paths)
+.perch/

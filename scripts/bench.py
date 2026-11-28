@@ -6,8 +6,8 @@ tokens, output TPS (tokens/sec of the streaming window). Aggregates p50/p95,
 success rate, and throughput per concurrency level, then compares targets.
 
 Usage:
-  .venv/bin/python bench.py                     # default sweep
-  .venv/bin/python bench.py -n 10 -c 1,4,16 --max-tokens 100
+  .venv/bin/python scripts/bench.py                     # default sweep
+  .venv/bin/python scripts/bench.py -n 10 -c 1,4,16 --max-tokens 100
 """
 
 from __future__ import annotations

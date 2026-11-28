@@ -34,7 +34,7 @@ web/src/llmgateway-ref/
 docs/
 
 # Test artifacts
-bench.py
+scripts/bench.py
 detailed.md
 AUDIT.md
 RESEARCH.md
